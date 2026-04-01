@@ -41,7 +41,6 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        # Uu tien dung build.spec neu co
         if (Test-Path "build.spec") {
           Write-Host "[INFO] Found build.spec, using it..."
           pyinstaller build.spec
@@ -53,30 +52,25 @@ jobs:
             --hidden-import=zstandard `
             --hidden-import=blinker `
             --hidden-import=pydivert `
-            --hidden-import=seleniumwire.thirdparty.mitmproxy `
             main.py
         } else {
           Write-Host "[INFO] Building without icon..."
           pyinstaller --onedir --windowed --name="SPAM_GROUPS" main.py
         }
 
-        # Kiem tra ket qua build
-        $exePaths = @(
-          "dist/SPAM_GROUPS/SPAM_GROUPS.exe",
-          "dist/spamgroup/spamgroup.exe",
-          "dist/main/main.exe"
-        )
+        # Kiem tra ket qua build - mo rong danh sach kiem tra
         $found = $false
-        foreach ($p in $exePaths) {
-          if (Test-Path $p) {
-            Write-Host "[SUCCESS] EXE found at: $p"
+        if (Test-Path "dist") {
+          Get-ChildItem "dist" -Recurse -Filter "*.exe" | ForEach-Object {
+            Write-Host "[SUCCESS] EXE found at: $($_.FullName)"
             $found = $true
-            break
           }
         }
         if (-not $found) {
           Write-Host "[ERROR] No EXE found after build!"
-          Get-ChildItem dist -Recurse | Select-Object FullName | Format-Table
+          if (Test-Path "dist") {
+            Get-ChildItem dist -Recurse | Select-Object FullName | Format-Table
+          }
           exit 1
         }
       shell: powershell
@@ -94,20 +88,19 @@ jobs:
           }
         }
         if (-not $distName) {
-          # Lay thu muc dau tien trong dist
           $distName = (Get-ChildItem dist -Directory | Select-Object -First 1).Name
         }
         Write-Host "[INFO] Dist folder detected: $distName"
         echo "dist-name=$distName" >> $env:GITHUB_OUTPUT
 
         # Doi ten thanh SPAM_GROUPS neu chua dung ten
+        # SUA LOI: Rename-Item chi nhan ten moi, khong nhan duong dan day du
         if ($distName -ne "SPAM_GROUPS") {
-          Rename-Item "dist/$distName" "dist/SPAM_GROUPS"
+          Rename-Item "dist/$distName" "SPAM_GROUPS"
           Write-Host "[SUCCESS] Renamed dist/$distName -> dist/SPAM_GROUPS"
-          # Doi ten EXE neu can
           $oldExe = "dist/SPAM_GROUPS/$distName.exe"
           if (Test-Path $oldExe) {
-            Rename-Item $oldExe "dist/SPAM_GROUPS/SPAM_GROUPS.exe"
+            Rename-Item $oldExe "SPAM_GROUPS.exe"
             Write-Host "[SUCCESS] Renamed EXE -> SPAM_GROUPS.exe"
           }
         }
@@ -144,7 +137,6 @@ jobs:
 
     - name: Copy icon to dist root
       run: |
-        # Tim ico
         $icoSources = @("ico/icon.ico", "image/icon.ico", "ico/ig.ico", "web/logo/ig.ico")
         foreach ($src in $icoSources) {
           if (Test-Path $src) {
@@ -175,7 +167,6 @@ jobs:
           }
         }
         if (-not $productId) {
-          # Khong bat buoc - dung placeholder
           echo "product-id=SPAM_GROUPS" >> $env:GITHUB_OUTPUT
           Write-Host "[WARNING] No config.json found, using default product-id"
         }
@@ -191,12 +182,11 @@ jobs:
 
     - name: Create folder structure and metadata files
       run: |
-        # Tao cac thu muc
         New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/config"
         New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/data"
         New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/key"
+        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/_internal/data"
 
-        # Tao version_client.json
         $versionData = @{
           version_client = "${{ steps.generate-uuid.outputs.uuid }}"
           product_id     = "${{ steps.get-product-id.outputs.product-id }}"
@@ -204,24 +194,17 @@ jobs:
           commit_sha     = "${{ github.sha }}"
         } | ConvertTo-Json -Depth 2
 
-        # Dam bao thu muc data ton tai trong _internal
-        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/_internal/data"
-
         $versionData | Out-File -FilePath "dist/SPAM_GROUPS/_internal/data/version_client.json" -Encoding UTF8 -NoNewline
         $versionData | Out-File -FilePath "dist/SPAM_GROUPS/data/version_client.json" -Encoding UTF8 -NoNewline
 
-        # README
         if (Test-Path "README.md") {
           Copy-Item "README.md" "dist/SPAM_GROUPS/"
         }
-
-        # update_info.json
         if (Test-Path "update_info.json") {
           Copy-Item "update_info.json" "dist/SPAM_GROUPS/"
           Write-Host "[SUCCESS] Copied update_info.json"
         }
 
-        # Di chuyen cac thu muc dac biet ra ngoai _internal
         $moveOut = @("ldplayer", "apk")
         foreach ($item in $moveOut) {
           $src = "dist/SPAM_GROUPS/_internal/$item"
@@ -231,7 +214,6 @@ jobs:
           }
         }
 
-        # Ket qua
         Write-Host "[SUCCESS] Created version_client.json with UUID: ${{ steps.generate-uuid.outputs.uuid }}"
       shell: powershell
 
@@ -300,7 +282,7 @@ jobs:
           - **UUID:** ${{ steps.generate-uuid.outputs.uuid }}
 
           ### 📁 Cấu trúc thư mục
-          ```
+```
           SPAM_GROUPS/
           ├── SPAM_GROUPS.exe
           ├── icon.ico
@@ -314,7 +296,7 @@ jobs:
               │   ├── config.json
               │   └── version_client.json
               └── [các folder từ source code]
-          ```
+```
       env:
         GITHUB_TOKEN: ${{ secrets.SPAM_GROUPS }}
 
