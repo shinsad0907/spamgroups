@@ -66,7 +66,7 @@ exe = EXE(
     icon='ico/icon.ico',  # Icon for exe
 )
 
-coll = Collection(
+coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
