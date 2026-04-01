@@ -17,7 +17,6 @@ a = Analysis(
     datas=[
         ('ico', 'ico'),              # Include ico folder
         ('data', 'data'),            # Include data folder
-        ('chrome-win', 'chrome-win'), # Include Chrome binary
     ],
     hiddenimports=[
         'PyQt5',
