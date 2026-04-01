@@ -1,0 +1,26 @@
+[
+    {
+        "id": "1",
+        "profile": "dsf",
+        "status": "connected",
+        "uid": "61581932321545",
+        "pass": "",
+        "2fa": "",
+        "email": "",
+        "passmail": "",
+        "groups": [
+            {
+                "name": "Phòng trọ Đà Nẵng",
+                "url": "https://www.facebook.com/groups/trodanang/"
+            },
+            {
+                "name": "Phòng Trọ, Căn Hộ, Nhà cho thuê Đà Nẵng",
+                "url": "https://www.facebook.com/groups/canhotaidanang/"
+            },
+            {
+                "name": "Phòng Trọ Đà Nẵng ✅",
+                "url": "https://www.facebook.com/groups/1866504283868257/"
+            }
+        ]
+    }
+]
