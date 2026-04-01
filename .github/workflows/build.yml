@@ -1,82 +1,378 @@
-name: Build Standalone EXE
+# code by shinsad
+
+name: Build EXE - SPAM_GROUPS
 
 on:
+  push:
+    branches: [main]
   push:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
-  build-exe:
+  build:
     runs-on: windows-latest
-    
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+      uuid: ${{ steps.generate-uuid.outputs.uuid }}
+      product-id: ${{ steps.get-product-id.outputs.product-id }}
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Python
-      uses: actions/setup-python@v4
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-    
+        python-version: '3.11'
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
         pip install pyinstaller pillow
-    
+        if (Test-Path requirements.txt) {
+          pip install -r requirements.txt
+        } else {
+          Write-Host "[WARNING] No requirements.txt found, skipping..."
+        }
+      shell: powershell
+
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller build.spec
-    
-    - name: Create release folder structure
+        # Uu tien dung build.spec neu co
+        if (Test-Path "build.spec") {
+          Write-Host "[INFO] Found build.spec, using it..."
+          pyinstaller build.spec
+        } elseif (Test-Path "ico/icon.ico") {
+          Write-Host "[INFO] Building with icon from ico/ folder..."
+          pyinstaller --onedir --windowed --icon="ico/icon.ico" --name="SPAM_GROUPS" `
+            --hidden-import=brotlicffi `
+            --hidden-import=kaitaistruct `
+            --hidden-import=zstandard `
+            --hidden-import=blinker `
+            --hidden-import=pydivert `
+            --hidden-import=seleniumwire.thirdparty.mitmproxy `
+            main.py
+        } else {
+          Write-Host "[INFO] Building without icon..."
+          pyinstaller --onedir --windowed --name="SPAM_GROUPS" main.py
+        }
+
+        # Kiem tra ket qua build
+        $exePaths = @(
+          "dist/SPAM_GROUPS/SPAM_GROUPS.exe",
+          "dist/spamgroup/spamgroup.exe",
+          "dist/main/main.exe"
+        )
+        $found = $false
+        foreach ($p in $exePaths) {
+          if (Test-Path $p) {
+            Write-Host "[SUCCESS] EXE found at: $p"
+            $found = $true
+            break
+          }
+        }
+        if (-not $found) {
+          Write-Host "[ERROR] No EXE found after build!"
+          Get-ChildItem dist -Recurse | Select-Object FullName | Format-Table
+          exit 1
+        }
+      shell: powershell
+
+    - name: Detect and normalize dist folder
+      id: detect-dist
       run: |
-        mkdir release
-        xcopy /E /I dist\spamgroup release\spamgroup
-        echo. > release\README.txt
-        echo Spamgroup Tool - Professional Edition >> release\README.txt
-        echo. >> release\README.txt
-        echo Run: spamgroup\spamgroup.exe >> release\README.txt
-    
-    - name: Compress release
+        # Tim thu muc dist chua EXE
+        $candidates = @("SPAM_GROUPS", "spamgroup", "main")
+        $distName = $null
+        foreach ($c in $candidates) {
+          if (Test-Path "dist/$c") {
+            $distName = $c
+            break
+          }
+        }
+        if (-not $distName) {
+          # Lay thu muc dau tien trong dist
+          $distName = (Get-ChildItem dist -Directory | Select-Object -First 1).Name
+        }
+        Write-Host "[INFO] Dist folder detected: $distName"
+        echo "dist-name=$distName" >> $env:GITHUB_OUTPUT
+
+        # Doi ten thanh SPAM_GROUPS neu chua dung ten
+        if ($distName -ne "SPAM_GROUPS") {
+          Rename-Item "dist/$distName" "dist/SPAM_GROUPS"
+          Write-Host "[SUCCESS] Renamed dist/$distName -> dist/SPAM_GROUPS"
+          # Doi ten EXE neu can
+          $oldExe = "dist/SPAM_GROUPS/$distName.exe"
+          if (Test-Path $oldExe) {
+            Rename-Item $oldExe "dist/SPAM_GROUPS/SPAM_GROUPS.exe"
+            Write-Host "[SUCCESS] Renamed EXE -> SPAM_GROUPS.exe"
+          }
+        }
+      shell: powershell
+
+    - name: Copy all source folders to _internal
       run: |
-        cd release
-        powershell -Command "Compress-Archive -Path spamgroup -DestinationPath spamgroup.zip"
-    
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+        Write-Host "=== Copying source folders to _internal ==="
+
+        $excludeFolders = @(
+          "dist", "build", "__pycache__", ".git", ".github",
+          "node_modules", ".vscode", ".idea", "venv", "env",
+          ".pytest_cache", "htmlcov", ".mypy_cache", "site-packages"
+        )
+
+        $allFolders = Get-ChildItem -Directory | Where-Object { $_.Name -notin $excludeFolders }
+
+        if ($allFolders.Count -eq 0) {
+          Write-Host "[WARNING] No folders to copy"
+        }
+
+        foreach ($folder in $allFolders) {
+          $dest = "dist/SPAM_GROUPS/_internal/$($folder.Name)"
+          try {
+            Copy-Item -Path $folder.FullName -Destination $dest -Recurse -Force
+            Write-Host "[SUCCESS] Copied: $($folder.Name)"
+          } catch {
+            Write-Host "[ERROR] Failed to copy $($folder.Name): $($_.Exception.Message)"
+          }
+        }
+
+        Write-Host "=== Copy completed ==="
+      shell: powershell
+
+    - name: Copy icon to dist root
+      run: |
+        # Tim ico
+        $icoSources = @("ico/icon.ico", "image/icon.ico", "ico/ig.ico", "web/logo/ig.ico")
+        foreach ($src in $icoSources) {
+          if (Test-Path $src) {
+            Copy-Item $src "dist/SPAM_GROUPS/icon.ico"
+            Write-Host "[SUCCESS] Copied icon from $src"
+            break
+          }
+        }
+      shell: powershell
+
+    - name: Get Product ID from config.json
+      id: get-product-id
+      run: |
+        $configPaths = @(
+          "dist/SPAM_GROUPS/_internal/data/config.json",
+          "data/config.json"
+        )
+        $productId = $null
+        foreach ($p in $configPaths) {
+          if (Test-Path $p) {
+            $config = Get-Content $p | ConvertFrom-Json
+            $productId = $config.id
+            if ($productId) {
+              echo "product-id=$productId" >> $env:GITHUB_OUTPUT
+              Write-Host "[SUCCESS] Product ID: $productId"
+              break
+            }
+          }
+        }
+        if (-not $productId) {
+          # Khong bat buoc - dung placeholder
+          echo "product-id=SPAM_GROUPS" >> $env:GITHUB_OUTPUT
+          Write-Host "[WARNING] No config.json found, using default product-id"
+        }
+      shell: powershell
+
+    - name: Generate UUID
+      id: generate-uuid
+      run: |
+        $uuid = [guid]::NewGuid().ToString()
+        echo "uuid=$uuid" >> $env:GITHUB_OUTPUT
+        Write-Host "[SUCCESS] UUID: $uuid"
+      shell: powershell
+
+    - name: Create folder structure and metadata files
+      run: |
+        # Tao cac thu muc
+        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/config"
+        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/data"
+        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/key"
+
+        # Tao version_client.json
+        $versionData = @{
+          version_client = "${{ steps.generate-uuid.outputs.uuid }}"
+          product_id     = "${{ steps.get-product-id.outputs.product-id }}"
+          created_at     = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+          commit_sha     = "${{ github.sha }}"
+        } | ConvertTo-Json -Depth 2
+
+        # Dam bao thu muc data ton tai trong _internal
+        New-Item -ItemType Directory -Force -Path "dist/SPAM_GROUPS/_internal/data"
+
+        $versionData | Out-File -FilePath "dist/SPAM_GROUPS/_internal/data/version_client.json" -Encoding UTF8 -NoNewline
+        $versionData | Out-File -FilePath "dist/SPAM_GROUPS/data/version_client.json" -Encoding UTF8 -NoNewline
+
+        # README
+        if (Test-Path "README.md") {
+          Copy-Item "README.md" "dist/SPAM_GROUPS/"
+        }
+
+        # update_info.json
+        if (Test-Path "update_info.json") {
+          Copy-Item "update_info.json" "dist/SPAM_GROUPS/"
+          Write-Host "[SUCCESS] Copied update_info.json"
+        }
+
+        # Di chuyen cac thu muc dac biet ra ngoai _internal
+        $moveOut = @("ldplayer", "apk")
+        foreach ($item in $moveOut) {
+          $src = "dist/SPAM_GROUPS/_internal/$item"
+          if (Test-Path $src) {
+            Move-Item $src "dist/SPAM_GROUPS/" -Force
+            Write-Host "[SUCCESS] Moved $item to root"
+          }
+        }
+
+        # Ket qua
+        Write-Host "[SUCCESS] Created version_client.json with UUID: ${{ steps.generate-uuid.outputs.uuid }}"
+      shell: powershell
+
+    - name: Verify build structure
+      run: |
+        Write-Host "=== SPAM_GROUPS Build Structure ==="
+        Get-ChildItem "dist/SPAM_GROUPS" | Format-Table Name, Mode
+
+        Write-Host "`n_internal contents:"
+        if (Test-Path "dist/SPAM_GROUPS/_internal") {
+          Get-ChildItem "dist/SPAM_GROUPS/_internal" | Select-Object Name, Length | Format-Table
+        }
+
+        if (Test-Path "dist/SPAM_GROUPS/SPAM_GROUPS.exe") {
+          Write-Host "[SUCCESS] SPAM_GROUPS.exe found"
+        } else {
+          Write-Host "[ERROR] SPAM_GROUPS.exe NOT found"
+          exit 1
+        }
+      shell: powershell
+
+    - name: Create ZIP package
+      run: |
+        cd dist
+        Compress-Archive -Path "SPAM_GROUPS" -DestinationPath "SPAM_GROUPS-windows.zip"
+        Write-Host "[SUCCESS] ZIP created: SPAM_GROUPS-windows.zip"
+        Write-Host "ZIP size: $((Get-Item 'SPAM_GROUPS-windows.zip').Length / 1MB) MB"
+      shell: powershell
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
       with:
-        name: spamgroup-exe
-        path: release/spamgroup/
-    
-    - name: Create GitHub Release
+        name: SPAM_GROUPS-windows
+        path: dist/SPAM_GROUPS-windows.zip
+
+    - name: Set version output
+      id: set-version
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION=$(echo ${{ github.ref }} | sed 's/refs\/tags\///')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "version=latest" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Create Release (tag push)
       if: startsWith(github.ref, 'refs/tags/')
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ github.ref_name }}
-        release_name: Spamgroup ${{ github.ref_name }}
-        body: |
-          ## Spamgroup Standalone EXE
-          
-          Professional standalone executable built from source.
-          
-          **How to use:**
-          1. Extract the `spamgroup` folder
-          2. Run `spamgroup/spamgroup.exe`
-          
-          No Python installation required.
+        files: dist/SPAM_GROUPS-windows.zip
         draft: false
         prerelease: false
-    
-    - name: Upload Release Asset (ZIP)
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: actions/upload-release-asset@v1
+        generate_release_notes: true
+        body: |
+          ## 🚀 SPAM_GROUPS ${{ steps.set-version.outputs.version }}
+
+          ### 📥 Cài đặt
+          1. Tải file `SPAM_GROUPS-windows.zip`
+          2. Giải nén
+          3. Chạy `SPAM_GROUPS/SPAM_GROUPS.exe`
+
+          ### 📦 Thông tin build
+          - **Commit:** ${{ github.sha }}
+          - **Build:** #${{ github.run_number }}
+          - **UUID:** ${{ steps.generate-uuid.outputs.uuid }}
+
+          ### 📁 Cấu trúc thư mục
+          ```
+          SPAM_GROUPS/
+          ├── SPAM_GROUPS.exe
+          ├── icon.ico
+          ├── README.md
+          ├── data/
+          │   └── version_client.json
+          ├── config/
+          ├── key/
+          └── _internal/
+              ├── data/
+              │   ├── config.json
+              │   └── version_client.json
+              └── [các folder từ source code]
+          ```
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.SPAM_GROUPS }}
+
+  auto-release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - uses: actions/checkout@v4
       with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./release/spamgroup.zip
-        asset_name: spamgroup-${{ github.ref_name }}.zip
-        asset_content_type: application/zip
+        fetch-depth: 0
+        token: ${{ secrets.SPAM_GROUPS }}
+
+    - name: Get next version
+      id: version
+      run: |
+        LATEST_TAG=$(git tag -l "v*" --sort=-version:refname | head -n1)
+        if [ -z "$LATEST_TAG" ]; then
+          NEW_VERSION="v1.0.0"
+        else
+          VERSION_NUMBER=$(echo $LATEST_TAG | sed 's/^v//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
+          PATCH=$((PATCH + 1))
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+        fi
+        echo "New version: $NEW_VERSION"
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: SPAM_GROUPS-windows
+        path: ./release
+
+    - name: Create auto release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        name: "SPAM_GROUPS Auto Release ${{ steps.version.outputs.version }}"
+        files: ./release/SPAM_GROUPS-windows.zip
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        body: |
+          ## 🤖 SPAM_GROUPS - Tự động phát hành ${{ steps.version.outputs.version }}
+
+          **Commit:** ${{ github.sha }}
+          **Build:** #${{ github.run_number }}
+          **UUID:** ${{ needs.build.outputs.uuid }}
+
+          ### 📥 Cài đặt
+          1. Tải `SPAM_GROUPS-windows.zip`
+          2. Giải nén
+          3. Chạy `SPAM_GROUPS/SPAM_GROUPS.exe`
+
+          ### 🔄 API kiểm tra cập nhật
+          `https://api.github.com/repos/${{ github.repository }}/releases/latest`
+      env:
+        GITHUB_TOKEN: ${{ secrets.SPAM_GROUPS }}
