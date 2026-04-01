@@ -5,7 +5,6 @@ name: Build EXE - SPAM_GROUPS
 on:
   push:
     branches: [main]
-  push:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
