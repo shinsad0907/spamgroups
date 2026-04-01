@@ -58,7 +58,7 @@ jobs:
           pyinstaller --onedir --windowed --name="SPAM_GROUPS" main.py
         }
 
-        # Kiem tra ket qua build - mo rong danh sach kiem tra
+        # Kiem tra ket qua build - tim bat ky file .exe nao trong dist
         $found = $false
         if (Test-Path "dist") {
           Get-ChildItem "dist" -Recurse -Filter "*.exe" | ForEach-Object {
@@ -78,7 +78,6 @@ jobs:
     - name: Detect and normalize dist folder
       id: detect-dist
       run: |
-        # Tim thu muc dist chua EXE
         $candidates = @("SPAM_GROUPS", "spamgroup", "main")
         $distName = $null
         foreach ($c in $candidates) {
@@ -93,8 +92,7 @@ jobs:
         Write-Host "[INFO] Dist folder detected: $distName"
         echo "dist-name=$distName" >> $env:GITHUB_OUTPUT
 
-        # Doi ten thanh SPAM_GROUPS neu chua dung ten
-        # SUA LOI: Rename-Item chi nhan ten moi, khong nhan duong dan day du
+        # SUA LOI: Rename-Item chi nhan ten moi, KHONG nhan duong dan day du
         if ($distName -ne "SPAM_GROUPS") {
           Rename-Item "dist/$distName" "SPAM_GROUPS"
           Write-Host "[SUCCESS] Renamed dist/$distName -> dist/SPAM_GROUPS"
@@ -282,78 +280,3 @@ jobs:
           - **UUID:** ${{ steps.generate-uuid.outputs.uuid }}
 
           ### 📁 Cấu trúc thư mục
-```
-          SPAM_GROUPS/
-          ├── SPAM_GROUPS.exe
-          ├── icon.ico
-          ├── README.md
-          ├── data/
-          │   └── version_client.json
-          ├── config/
-          ├── key/
-          └── _internal/
-              ├── data/
-              │   ├── config.json
-              │   └── version_client.json
-              └── [các folder từ source code]
-```
-      env:
-        GITHUB_TOKEN: ${{ secrets.SPAM_GROUPS }}
-
-  auto-release:
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
-
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        token: ${{ secrets.SPAM_GROUPS }}
-
-    - name: Get next version
-      id: version
-      run: |
-        LATEST_TAG=$(git tag -l "v*" --sort=-version:refname | head -n1)
-        if [ -z "$LATEST_TAG" ]; then
-          NEW_VERSION="v1.0.0"
-        else
-          VERSION_NUMBER=$(echo $LATEST_TAG | sed 's/^v//')
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
-          PATCH=$((PATCH + 1))
-          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
-        fi
-        echo "New version: $NEW_VERSION"
-        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: SPAM_GROUPS-windows
-        path: ./release
-
-    - name: Create auto release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.version.outputs.version }}
-        name: "SPAM_GROUPS Auto Release ${{ steps.version.outputs.version }}"
-        files: ./release/SPAM_GROUPS-windows.zip
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-        body: |
-          ## 🤖 SPAM_GROUPS - Tự động phát hành ${{ steps.version.outputs.version }}
-
-          **Commit:** ${{ github.sha }}
-          **Build:** #${{ github.run_number }}
-          **UUID:** ${{ needs.build.outputs.uuid }}
-
-          ### 📥 Cài đặt
-          1. Tải `SPAM_GROUPS-windows.zip`
-          2. Giải nén
-          3. Chạy `SPAM_GROUPS/SPAM_GROUPS.exe`
-
-          ### 🔄 API kiểm tra cập nhật
-          `https://api.github.com/repos/${{ github.repository }}/releases/latest`
-      env:
-        GITHUB_TOKEN: ${{ secrets.SPAM_GROUPS }}
