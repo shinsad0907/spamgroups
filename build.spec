@@ -63,7 +63,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='ico/facebook.png',  # Icon for exe
+    icon='ico/icon.ico',  # Icon for exe
 )
 
 coll = Collection(
