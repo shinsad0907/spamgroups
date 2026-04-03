@@ -39,7 +39,10 @@ class ChromiumDriver:
         opts.add_argument("--disable-extensions")
         opts.add_argument("--disable-popup-blocking")
         opts.add_argument("--window-size=390,844")
-
+        # ===== ẨN TOOLBAR / TAB BAR =====
+        opts.add_argument("--app=https://www.facebook.com")  # Mở ở app mode - ẩn toolbar
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--hide-crash-restore-bubble")
         # ===== USER AGENT =====
         opts.add_argument(
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

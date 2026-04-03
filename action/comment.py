@@ -10,6 +10,7 @@ import random
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import StaleElementReferenceException
+from AI.chatAI import generate_ai_content
 
 
 class CommentGroups:
@@ -26,6 +27,8 @@ class CommentGroups:
         self.cmt_count    = data.get('cmt_count', 3)
         self.delay_min    = data.get('delay_min', 30)
         self.delay_max    = data.get('delay_max', 60)
+        self.use_ai       = data.get('use_ai', False)
+        self.ai_config    = data.get('ai_config', {})
 
         self.log_callback     = log_callback
         self.success_callback = success_callback
@@ -194,7 +197,25 @@ class CommentGroups:
                 self._log("[ERROR] Không tìm được ô comment")
                 return False
 
-            spin_text = self._spin_content(self.content)
+            # ── Xử lý nội dung với AI nếu được enable ────────────
+            content_to_use = self.content
+            if self.use_ai and self.ai_config:
+                try:
+                    self._log("[INFO] 🤖 Đang gọi AI để xử lý nội dung...")
+                    self._log(f"[DEBUG] BEFORE AI: '{self.content}'")
+                    content_to_use = generate_ai_content(self.content, self.ai_config)
+                    self._log(f"[DEBUG] AFTER AI:  '{content_to_use}'")
+                    self._log(f"[DEBUG] CHANGED:   {content_to_use != self.content}")
+                    if content_to_use and content_to_use.strip():
+                        self._log(f"[OK] AI xử lý xong: {content_to_use[:60]}...")
+                    else:
+                        self._log("[WARN] AI trả về nội dung rỗng, dùng nội dung gốc")
+                        content_to_use = self.content
+                except Exception as e:
+                    self._log(f"[ERROR] AI call failed: {e}, dùng nội dung gốc")
+                    content_to_use = self.content
+            
+            spin_text = self._spin_content(content_to_use)
             comment_box.click()
             self._sleep(1)
             comment_box.send_keys(spin_text)

@@ -1,10 +1,13 @@
-import sys, os, random, time, json, traceback
+import sys, os, random, time, json, traceback, subprocess
 from datetime import datetime
 
 from browser_engine.chrome_driver import ChromiumDriver
 from action.scan_groups import GroupScanner
+from action.post_groups import PostGroups
 from action.comment import CommentGroups
+from action.uptop import UpTop
 from key.check_key import KeyChecker
+from AI.chatAI import generate_ai_content
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -12,10 +15,13 @@ from PyQt5.QtWidgets import (
     QGroupBox, QSpinBox, QFileDialog, QMessageBox, QDialog,
     QFrame, QStatusBar, QProgressBar, QCheckBox,
     QAbstractItemView, QMenu, QAction, QHeaderView,
-    QListWidget, QSizePolicy
+    QListWidget, QListWidgetItem, QSizePolicy, QComboBox, QScrollArea, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QTimer, QRect, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QColor, QBrush
+
+import win32gui
+import win32con
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DARK STYLESHEET
@@ -180,6 +186,17 @@ QMenuBar {
 }
 """
 
+class ResizableContainer(QWidget):
+    resized = pyqtSignal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.resized.emit()
+
 # ── Button style helpers ──────────────────────────────────────────────────────
 def _btn(bg, bg_h, fg="#ffffff", fs=13, pad=8, bold=True, radius=4):
     b = "font-weight:bold;" if bold else ""
@@ -201,6 +218,671 @@ BTN_NAV   = ("QPushButton{background:#313244;color:#cdd6f4;border:1px solid #454
              "QPushButton:disabled{color:#45475a;background:#1e1e2e;border-color:#313244;}")
 
 driver = None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AI CONFIG DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+class AIConfigDialog(QDialog):
+    """Dialog cấu hình AI - với text điều khiển, chọn model, key Groq, link tạo key"""
+    
+    def __init__(self, profile_name: str, parent=None):
+        super().__init__(parent)
+        self.profile_name = profile_name
+        self.setWindowTitle(f"⚙ Cấu hình AI - {profile_name}")
+        self.setFixedSize(650, 500)
+        self.setStyleSheet(DARK)
+        self._ai_config_file = self._get_config_path()
+        self._build()
+        self._load_config()
+
+    def _get_config_path(self) -> str:
+        """Đường dẫn file lưu AI config cho profile này"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        data = os.path.join(base, "data")
+        os.makedirs(data, exist_ok=True)
+        return os.path.join(data, f"ai_config_{self.profile_name}.json")
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+        lay.setContentsMargins(18, 18, 18, 18)
+
+        # Tiêu đề
+        title = QLabel("🤖  ĐIỀU KHIỂN AI")
+        title.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        title.setStyleSheet("color:#89b4fa;background:transparent;")
+        lay.addWidget(title)
+
+        # ─────────────────────────
+        # Phần 1: Prompt điều khiển
+        # ─────────────────────────
+        gb1 = QGroupBox("📝  Prompt điều khiển AI")
+        gb1_lay = QVBoxLayout(gb1)
+        gb1_lay.setContentsMargins(12, 8, 12, 10)
+        
+        hint = QLabel("💡 Hướng dẫn: Viết lệnh cho AI để viết lại bài viết. VD: 'Viết lại bài trên tông nhẹ nhàng, tươi vui'")
+        hint.setStyleSheet("color:#6c7086;font-size:11px;font-style:italic;background:transparent;")
+        hint.setWordWrap(True)
+        gb1_lay.addWidget(hint)
+        
+        self.ai_prompt = QTextEdit()
+        self.ai_prompt.setPlaceholderText("Nhập prompt điều khiển AI tại đây...")
+        self.ai_prompt.setFixedHeight(100)
+        self.ai_prompt.setStyleSheet(
+            "QTextEdit{background:#181825;border:1px solid #45475a;border-radius:6px;"
+            "font-size:12px;color:#cdd6f4;padding:8px;}"
+            "QTextEdit:focus{border-color:#89b4fa;}")
+        gb1_lay.addWidget(self.ai_prompt)
+        lay.addWidget(gb1)
+
+        # ─────────────────────────
+        # Phần 2: Chọn model AI
+        # ─────────────────────────
+        gb2 = QGroupBox("🧠  Chọn Model AI")
+        gb2_lay = QHBoxLayout(gb2)
+        gb2_lay.setContentsMargins(12, 8, 12, 10)
+        gb2_lay.setSpacing(10)
+        
+        lbl_model = QLabel("Model:")
+        lbl_model.setStyleSheet("background:transparent;color:#a6adc8;font-weight:bold;")
+        self.ai_model = QComboBox()
+        # Hiển thị tên dễ hiểu, backend lưu tên thực
+        self.ai_model.addItems([
+            "🚀 Llama 3.3 (Nhanh - Khuyến nghị)",
+            "⚖️ Mixtral 8x7b (Cân bằng)",
+            "🔧 Llama 3.1 (Khác)"
+        ])
+        self.ai_model.setFixedWidth(280)
+        self.ai_model.setStyleSheet(
+            "QComboBox{background:#313244;border:1px solid #45475a;border-radius:4px;"
+            "color:#cdd6f4;padding:4px 8px;font-size:12px;}"
+            "QComboBox:focus{border-color:#89b4fa;}"
+            "QComboBox::drop-down{border:none;}"
+            "QComboBox QAbstractItemView{background:#313244;color:#cdd6f4;}")
+        
+        gb2_lay.addWidget(lbl_model)
+        gb2_lay.addWidget(self.ai_model)
+        gb2_lay.addStretch()
+        lay.addWidget(gb2)
+
+        # ─────────────────────────
+        # Phần 3: Key Groq
+        # ─────────────────────────
+        gb3 = QGroupBox("🔐  Key Groq / API Key")
+        gb3_lay = QVBoxLayout(gb3)
+        gb3_lay.setContentsMargins(12, 8, 12, 10)
+        gb3_lay.setSpacing(6)
+        
+        row_key = QHBoxLayout()
+        row_key.setSpacing(6)
+        
+        self.groq_key = QLineEdit()
+        self.groq_key.setPlaceholderText("Nhập Groq API Key...")
+        self.groq_key.setEchoMode(QLineEdit.Password)  # Ẩn key
+        self.groq_key.setStyleSheet(
+            "QLineEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+            "padding:6px 10px;font-size:12px;color:#cdd6f4;}"
+            "QLineEdit:focus{border-color:#89b4fa;}")
+        
+        btn_show = QPushButton("👁 Hiện")
+        btn_show.setFixedWidth(70)
+        btn_show.setStyleSheet(BTN_GRAY)
+        btn_show.clicked.connect(lambda: self.groq_key.setEchoMode(
+            QLineEdit.Normal if self.groq_key.echoMode() == QLineEdit.Password else QLineEdit.Password))
+        
+        row_key.addWidget(self.groq_key, 1)
+        row_key.addWidget(btn_show)
+        gb3_lay.addLayout(row_key)
+        
+        # Link tạo key
+        row_link = QHBoxLayout()
+        row_link.setSpacing(6)
+        lbl_link = QLabel("🔗 Tạo API Key:")
+        lbl_link.setStyleSheet("background:transparent;color:#a6adc8;font-weight:bold;font-size:11px;")
+        btn_create = QPushButton("→ console.groq.com")
+        btn_create.setStyleSheet(
+            "QPushButton{background:transparent;color:#89b4fa;border:1px solid #89b4fa;"
+            "border-radius:4px;padding:4px 12px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#89b4fa;color:#1e1e2e;}")
+        btn_create.clicked.connect(lambda: self._open_groq_console())
+        row_link.addWidget(lbl_link)
+        row_link.addWidget(btn_create)
+        row_link.addStretch()
+        gb3_lay.addLayout(row_link)
+        
+        lay.addWidget(gb3)
+
+        # ─────────────────────────
+        # Nút Lưu / Hủy
+        # ─────────────────────────
+        row_btn = QHBoxLayout()
+        row_btn.setSpacing(8)
+        
+        btn_save = QPushButton("💾  LƯU CẤU HÌNH")
+        btn_save.setStyleSheet(BTN_GREEN(12, 8))
+        btn_save.setFixedHeight(36)
+        btn_save.clicked.connect(self._save_config)
+        
+        btn_cancel = QPushButton("✕  HỦY")
+        btn_cancel.setStyleSheet(BTN_GRAY)
+        btn_cancel.setFixedHeight(36)
+        btn_cancel.clicked.connect(self.reject)
+        
+        row_btn.addWidget(btn_save, 1)
+        row_btn.addWidget(btn_cancel, 1)
+        lay.addLayout(row_btn)
+
+    def _get_model_map(self) -> dict:
+        """Map giữa display name và actual model name"""
+        return {
+            "🚀 Llama 3.3 (Nhanh - Khuyến nghị)": "llama-3.3-70b-versatile",
+            "⚖️ Mixtral 8x7b (Cân bằng)": "mixtral-8x7b-32768",
+            "🔧 Llama 3.1 (Khác)": "llama-3.1-70b-versatile",
+            # Support tên cũ
+            "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
+            "mixtral-8x7b-32768": "mixtral-8x7b-32768",
+            "llama-3.1-70b-versatile": "llama-3.1-70b-versatile",
+        }
+    
+    def _display_name_to_model(self, display_name: str) -> str:
+        """Convert display name thành actual model name"""
+        model_map = self._get_model_map()
+        return model_map.get(display_name, "llama-3.3-70b-versatile")
+    
+    def _model_to_display_name(self, model_name: str) -> str:
+        """Convert actual model name thành display name"""
+        reverse_map = {v: k for k, v in self._get_model_map().items()}
+        # Trả về display name, nếu không tìm thì trả về model name gốc
+        return list(reverse_map.values())[list(reverse_map.keys()).index(model_name)] if model_name in reverse_map else model_name
+
+    def _open_groq_console(self):
+        """Mở link tạo Groq API key với Chrome"""
+        try:
+            # Tìm Chrome executable
+            chrome_path = self._get_chrome_path()
+            if chrome_path and os.path.exists(chrome_path):
+                subprocess.Popen([chrome_path, "https://console.groq.com/keys"])
+            else:
+                # Fallback: mở với trình duyệt mặc định
+                import webbrowser
+                webbrowser.open("https://console.groq.com/keys")
+        except Exception as e:
+            print(f"[ERROR] Lỗi mở Chrome: {e}", flush=True)
+        
+        QMessageBox.information(self, "Groq Console", 
+            "✅ Đã mở: https://console.groq.com/keys\n\n"
+            "1. Đăng nhập hoặc tạo tài khoản Groq\n"
+            "2. Tạo API Key mới\n"
+            "3. Copy và dán vào ô 'Key Groq' ở đây")
+    
+    def _get_chrome_path(self) -> str:
+        """Lấy đường dẫn Chrome executable"""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Cách 1: Chrome trong thư mục chrome-win
+        chrome_win_path = os.path.join(base_dir, "chrome-win", "chrome.exe")
+        if os.path.exists(chrome_win_path):
+            return chrome_win_path
+        
+        # Cách 2: Chrome chuẩn trong system
+        possible_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        return None
+
+    def _save_config(self):
+        """Lưu cấu hình AI vào file JSON"""
+        display_name = self.ai_model.currentText()
+        actual_model = self._display_name_to_model(display_name)
+        
+        config = {
+            'ai_prompt': self.ai_prompt.toPlainText().strip(),
+            'ai_model': actual_model,  # Lưu actual model name, không phải display name
+            'groq_key': self.groq_key.text().strip(),
+        }
+        
+        try:
+            with open(self._ai_config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            QMessageBox.information(self, "Thành công", "✅ Cấu hình AI đã được lưu!")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"❌ Lỗi lưu cấu hình: {e}")
+
+    def _load_config(self):
+        """Load cấu hình AI từ file nếu tồn tại"""
+        if os.path.isfile(self._ai_config_file):
+            try:
+                with open(self._ai_config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                self.ai_prompt.setPlainText(config.get('ai_prompt', ''))
+                
+                # Load model - convert actual model name thành display name
+                model_val = config.get('ai_model', 'llama-3.3-70b-versatile')
+                
+                # Map cái tên cũ thành actual model name nếu cần
+                old_to_new = {
+                    'ChatGPT': 'llama-3.3-70b-versatile',
+                    'Llama': 'llama-3.3-70b-versatile',
+                    'Claude': 'mixtral-8x7b-32768'
+                }
+                model_val = old_to_new.get(model_val, model_val)
+                
+                # Tìm display name của model này
+                model_map = self._get_model_map()
+                display_name = [k for k, v in model_map.items() if v == model_val and '🚀' in k or '⚖️' in k or '🔧' in k]
+                if display_name:
+                    self.ai_model.setCurrentText(display_name[0])
+                else:
+                    self.ai_model.setCurrentIndex(0)  # Default: Llama 3.3
+                
+                self.groq_key.setText(config.get('groq_key', ''))
+            except Exception as e:
+                print(f"[AI CONFIG] Load lỗi: {e}")
+
+    def get_config(self) -> dict:
+        """Lấy cấu hình hiện tại - lưu actual model name"""
+        display_name = self.ai_model.currentText()
+        actual_model = self._display_name_to_model(display_name)
+        
+        return {
+            'ai_prompt': self.ai_prompt.toPlainText().strip(),
+            'ai_model': actual_model,  # Lưu actual model name
+            'groq_key': self.groq_key.text().strip(),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GROUP FILTER DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+class GroupFilterDialog(QDialog):
+    """Dialog lọc nhóm theo tiêu chí - thiết kế chip-button chuyên nghiệp"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("⬇  Lọc Nhóm")
+        self.setFixedSize(580, 340)
+        self.setStyleSheet(DARK)
+        self.selected_filters = []
+        self.filter_buttons = {}  # code -> button
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(0)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        # Header
+        header = QWidget()
+        header.setFixedHeight(55)
+        header.setStyleSheet("background:linear-gradient(90deg, #0f0f1e 0%, #1a1a2e 100%);border-bottom:2px solid #89b4fa;")
+        h_lay = QVBoxLayout(header)
+        h_lay.setContentsMargins(24, 10, 24, 10)
+        title = QLabel("🔍  CHỌN TIÊU CHÍ LỌC")
+        title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        title.setStyleSheet("color:#89b4fa;background:transparent;")
+        h_lay.addWidget(title)
+        lay.addWidget(header)
+
+        # Content - Chip buttons
+        content = QWidget()
+        content_lay = QVBoxLayout(content)
+        content_lay.setSpacing(14)
+        content_lay.setContentsMargins(24, 24, 24, 20)
+        
+        filters = [
+            ("🔥  Chạy gần nhất", "recent"),
+            ("⏳  Chạy lâu nhất", "oldest"),
+            ("📊  Chạy ít nhất", "least"),
+            ("⭐  Chạy nhiều nhất", "most"),
+            ("🆕  Chưa chạy lần nào", "never"),
+        ]
+        
+        for label, code in filters:
+            btn = self._create_chip_button(label, code)
+            content_lay.addWidget(btn)
+        
+        content_lay.addStretch()
+        lay.addWidget(content, 1)
+
+        # Footer - Action buttons
+        footer = QWidget()
+        footer.setFixedHeight(65)
+        footer.setStyleSheet("background:#0f0f1e;border-top:1px solid #45475a;")
+        f_lay = QVBoxLayout(footer)
+        f_lay.setContentsMargins(24, 12, 24, 12)
+        
+        row_btn = QHBoxLayout()
+        row_btn.setSpacing(12)
+        
+        btn_apply = QPushButton("✓  LỌचTRỪ")
+        btn_apply.setStyleSheet(
+            "QPushButton{background:linear-gradient(135deg, #40a02b 0%, #2d8c1a 100%);color:white;border:none;"
+            "border-radius:8px;font-weight:bold;font-size:11px;padding:0 24px;}"
+            "QPushButton:hover{background:linear-gradient(135deg, #45ad32 0%, #318521 100%);}"
+            "QPushButton:pressed{background:#2d8c1a;}")
+        btn_apply.setFixedHeight(40)
+        btn_apply.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        btn_apply.clicked.connect(self._apply_filter)
+        
+        btn_cancel = QPushButton("✕  HỦY")
+        btn_cancel.setStyleSheet(
+            "QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;"
+            "border-radius:8px;font-weight:bold;font-size:11px;padding:0 24px;}"
+            "QPushButton:hover{background:#3a3a4d;border-color:#89b4fa;}"
+            "QPushButton:pressed{background:#2a2a3c;}")
+        btn_cancel.setFixedHeight(40)
+        btn_cancel.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        btn_cancel.clicked.connect(self.reject)
+        
+        row_btn.addWidget(btn_apply, 1)
+        row_btn.addWidget(btn_cancel, 1)
+        f_lay.addLayout(row_btn)
+        lay.addWidget(footer)
+    
+    def _create_chip_button(self, label, code):
+        """Tạo chip-button style chuyên nghiệp"""
+        btn = QPushButton(label)
+        btn.setFixedHeight(42)
+        btn.setCheckable(True)
+        btn.setStyleSheet(
+            "QPushButton{background:#1e1e2e;color:#cdd6f4;border:2px solid #45475a;border-radius:8px;"
+            "font-size:11px;font-weight:bold;padding:0 16px;text-align:left;}"
+            "QPushButton:hover{background:#252535;border-color:#89b4fa;}"
+            "QPushButton:checked{background:#40a02b;color:#1e1e2e;border-color:#40a02b;}"
+            "QPushButton:pressed{background:#3a8f26;}")
+        btn.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        self.filter_buttons[code] = btn
+        return btn
+
+    def _apply_filter(self):
+        """Lấy danh sách filter được chọn"""
+        self.selected_filters = []
+        for code, btn in self.filter_buttons.items():
+            if btn.isChecked():
+                self.selected_filters.append(code)
+        
+        self.accept()
+
+    def get_filters(self):
+        """Lấy danh sách filter đã chọn"""
+        return self.selected_filters
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONTENT MANAGER DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+class ContentManagerDialog(QDialog):
+    """Dialog quản lý nội dung - lưu, xem, copy các nội dung đã tạo"""
+    
+    def __init__(self, profile_name: str, parent=None):
+        super().__init__(parent)
+        self.profile_name = profile_name
+        self.contents = []  # Danh sách nội dung đã lưu
+        self.selected_content_idx = 0
+        self.setWindowTitle(f"📝  Quản lý Nội dung - {profile_name}")
+        self.setFixedSize(900, 500)
+        self.setStyleSheet(DARK)
+        self._content_file = self._get_content_path()
+        self._load_contents()
+        self._build()
+
+    def _get_content_path(self) -> str:
+        """Đường dẫn file lưu nội dung cho profile này"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        data = os.path.join(base, "data")
+        os.makedirs(data, exist_ok=True)
+        return os.path.join(data, f"contents_{self.profile_name}.json")
+
+    def _load_contents(self):
+        """Load nội dung từ file JSON"""
+        if os.path.isfile(self._content_file):
+            try:
+                with open(self._content_file, 'r', encoding='utf-8') as f:
+                    self.contents = json.load(f)
+            except Exception as e:
+                print(f"[CONTENT] Load lỗi: {e}")
+                self.contents = []
+
+    def _save_contents(self):
+        """Lưu nội dung vào file JSON"""
+        try:
+            with open(self._content_file, 'w', encoding='utf-8') as f:
+                json.dump(self.contents, f, ensure_ascii=False, indent=2)
+            print(f"[CONTENT] Đã lưu {len(self.contents)} nội dung")
+        except Exception as e:
+            print(f"[CONTENT] Save lỗi: {e}")
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+        lay.setContentsMargins(18, 18, 18, 18)
+
+        # ──── Tiêu đề ────
+        title = QLabel("📝  QUẢN LÝ NỘI DUNG")
+        title.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        title.setStyleSheet("color:#89b4fa;background:transparent;")
+        lay.addWidget(title)
+
+        # ──── Phần thêm nội dung mới ────
+        gb_add = QGroupBox("➕  Thêm nội dung mới")
+        gb_add_lay = QVBoxLayout(gb_add)
+        gb_add_lay.setContentsMargins(12, 8, 12, 10)
+        gb_add_lay.setSpacing(6)
+        
+        self.input_content = QTextEdit()
+        self.input_content.setPlaceholderText("Nhập nội dung mới tại đây... (1 nội dung)")
+        self.input_content.setFixedHeight(80)
+        self.input_content.setStyleSheet(
+            "QTextEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+            "font-size:12px;color:#cdd6f4;padding:8px;}"
+            "QTextEdit:focus{border-color:#89b4fa;}")
+        gb_add_lay.addWidget(self.input_content)
+        
+        row_btn = QHBoxLayout()
+        row_btn.setSpacing(6)
+        
+        btn_add = QPushButton("✚  THÊM NỘI DUNG")
+        btn_add.setStyleSheet(BTN_GREEN(12, 8))
+        btn_add.setFixedHeight(32)
+        btn_add.clicked.connect(self._add_content)
+        
+        btn_clear_input = QPushButton("⊘  Clear")
+        btn_clear_input.setStyleSheet(BTN_GRAY)
+        btn_clear_input.setFixedHeight(32)
+        btn_clear_input.setFixedWidth(80)
+        btn_clear_input.clicked.connect(self.input_content.clear)
+        
+        row_btn.addWidget(btn_add, 1)
+        row_btn.addWidget(btn_clear_input)
+        gb_add_lay.addLayout(row_btn)
+        lay.addWidget(gb_add)
+
+        # ──── Phần chính: Danh sách + Xem chi tiết ────
+        main_lay = QHBoxLayout()
+        main_lay.setSpacing(12)
+
+        # Bên TRÁI: Danh sách nội dung (như button)
+        gb_list = QGroupBox("📋  Danh sách nội dung đã lưu")
+        gb_list_lay = QVBoxLayout(gb_list)
+        gb_list_lay.setContentsMargins(8, 8, 8, 8)
+        gb_list_lay.setSpacing(6)
+        
+        self.scroll_contents = QWidget()
+        self.scroll_layout = QVBoxLayout(self.scroll_contents)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(6)
+        self.content_buttons = []  # Danh sách button để update styling
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.scroll_contents)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet(
+            "QScrollArea{background:#11111b;border:none;}"
+            "QScrollBar:vertical{background:#313244;border:none;width:10px;}"
+            "QScrollBar::handle:vertical{background:#45475a;border-radius:5px;}"
+            "QScrollBar::handle:vertical:hover{background:#585b70;}")
+        gb_list_lay.addWidget(scroll_area)
+        main_lay.addWidget(gb_list, 1)
+
+        # Bên PHẢI: Xem chi tiết + Copy
+        gb_view = QGroupBox("👁  Xem chi tiết")
+        gb_view_lay = QVBoxLayout(gb_view)
+        gb_view_lay.setContentsMargins(8, 8, 8, 8)
+        gb_view_lay.setSpacing(6)
+        
+        self.view_content = QTextEdit()
+        self.view_content.setReadOnly(True)
+        self.view_content.setStyleSheet(
+            "QTextEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+            "font-size:12px;color:#cdd6f4;padding:8px;font-family:'Segoe UI';}")
+        gb_view_lay.addWidget(self.view_content, 1)
+        
+        row_action = QHBoxLayout()
+        row_action.setSpacing(6)
+        
+        btn_copy = QPushButton("📋  Copy")
+        btn_copy.setStyleSheet(BTN_GREEN(12, 6))
+        btn_copy.setFixedHeight(28)
+        btn_copy.clicked.connect(self._copy_content)
+        
+        btn_delete = QPushButton("🗑  Xóa")
+        btn_delete.setStyleSheet(
+            "QPushButton{background:#f38ba8;color:white;border:none;border-radius:4px;"
+            "padding:6px 12px;font-size:11px;font-weight:bold;}"
+            "QPushButton:hover{background:#d94477;}")
+        btn_delete.setFixedHeight(28)
+        btn_delete.clicked.connect(self._delete_content)
+        
+        row_action.addWidget(btn_copy, 1)
+        row_action.addWidget(btn_delete, 1)
+        gb_view_lay.addLayout(row_action)
+        main_lay.addWidget(gb_view, 1)
+
+        lay.addLayout(main_lay, 1)
+
+        # ──── Nút đóng ────
+        btn_close = QPushButton("✕  Đóng")
+        btn_close.setStyleSheet(BTN_GRAY)
+        btn_close.setFixedHeight(32)
+        btn_close.clicked.connect(self.close)
+        lay.addWidget(btn_close)
+
+        # Refresh UI danh sách
+        self._refresh_content_buttons()
+
+    def _refresh_content_buttons(self):
+        """Làm sạch và tạo lại danh sách nút nội dung"""
+        # Xóa layout cũ
+        while self.scroll_layout.count():
+            item = self.scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        self.content_buttons = []  # Reset danh sách button
+
+        if not self.contents:
+            lbl = QLabel("Chưa có nội dung nào")
+            lbl.setStyleSheet("color:#6c7086;font-style:italic;background:transparent;")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.scroll_layout.addWidget(lbl)
+            self.view_content.clear()
+            return
+
+        # Tạo button cho mỗi nội dung
+        for idx, content_item in enumerate(self.contents):
+            text = content_item if isinstance(content_item, str) else content_item.get('text', '')
+            # Lấy preview (50 ký tự đầu)
+            preview = text[:50] + "..." if len(text) > 50 else text
+            
+            btn = QPushButton(f"{idx + 1}. {preview}")
+            btn.setFixedHeight(50)
+            btn.setStyleSheet(
+                f"QPushButton{{background:{'#89b4fa' if idx == self.selected_content_idx else '#313244'};"
+                f"color:{'#1e1e2e' if idx == self.selected_content_idx else '#cdd6f4'};"
+                f"border:1px solid #45475a;border-radius:4px;padding:8px;text-align:left;white-space:pre-wrap;"
+                f"font-size:11px;font-weight:bold;}}"
+                f"QPushButton:hover{{background:#45475a;}}")
+            btn.clicked.connect(lambda checked, i=idx: self._select_content(i))
+            btn._content_idx = idx  # Lưu index để dùng sau
+            self.scroll_layout.addWidget(btn)
+            self.content_buttons.append(btn)
+
+        self.scroll_layout.addStretch()
+        # Chọn nội dung đầu tiên mà không refresh button (vì button đã được tạo)
+        if len(self.contents) > 0:
+            self.selected_content_idx = min(self.selected_content_idx, len(self.contents) - 1)
+            content = self.contents[self.selected_content_idx]
+            text = content if isinstance(content, str) else content.get('text', '')
+            self.view_content.setPlainText(text)
+
+    def _select_content(self, idx: int):
+        """Chọn và hiển thị nội dung"""
+        if 0 <= idx < len(self.contents):
+            self.selected_content_idx = idx
+            content = self.contents[idx]
+            text = content if isinstance(content, str) else content.get('text', '')
+            self.view_content.setPlainText(text)
+            # Update button styles khi chọn nội dung mới
+            self._update_button_styles()
+
+    def _update_button_styles(self):
+        """Cập nhật styling của các button dựa trên lựa chọn hiện tại"""
+        for btn in self.content_buttons:
+            idx = btn._content_idx
+            is_selected = (idx == self.selected_content_idx)
+            btn.setStyleSheet(
+                f"QPushButton{{background:{'#89b4fa' if is_selected else '#313244'};"
+                f"color:{'#1e1e2e' if is_selected else '#cdd6f4'};"
+                f"border:1px solid #45475a;border-radius:4px;padding:8px;text-align:left;white-space:pre-wrap;"
+                f"font-size:11px;font-weight:bold;}}"
+                f"QPushButton:hover{{background:#45475a;}}")
+
+    def _add_content(self):
+        """Thêm nội dung mới"""
+        text = self.input_content.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Cảnh báo", "⚠ Vui lòng nhập nội dung!")
+            return
+        
+        self.contents.append(text)
+        self._save_contents()
+        self.input_content.clear()
+        self._refresh_content_buttons()
+        QMessageBox.information(self, "Thành công", "✅ Đã thêm nội dung!")
+
+    def _delete_content(self):
+        """Xóa nội dung đang chọn"""
+        if 0 <= self.selected_content_idx < len(self.contents):
+            if QMessageBox.question(self, "Xác nhận", "Bạn chắc chắn muốn xóa nội dung này?",
+                                   QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                self.contents.pop(self.selected_content_idx)
+                self._save_contents()
+                if self.selected_content_idx >= len(self.contents):
+                    self.selected_content_idx = max(0, len(self.contents) - 1)
+                self._refresh_content_buttons()
+                QMessageBox.information(self, "Thành công", "✅ Đã xóa nội dung!")
+
+    def _copy_content(self):
+        """Copy nội dung hiện tại"""
+        text = self.view_content.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(self, "Thành công", "✅ Đã copy nội dung vào clipboard!")
+        else:
+            QMessageBox.warning(self, "Cảnh báo", "⚠ Nội dung trống!")
+
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LICENSE DIALOG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -214,7 +896,11 @@ class LicenseDialog(QDialog):
         self.setWindowTitle("License - Kích hoạt phần mềm")
         self.setFixedSize(550, 360)
         self.setStyleSheet(DARK)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.CustomizeWindowHint |
+            Qt.WindowTitleHint  # Chỉ giữ title, không có nút X, _, □
+        )
         self._build()
 
     def keyPressEvent(self, e):
@@ -480,16 +1166,21 @@ class FacebookWindow(QMainWindow):
         self._cmt_worker = None
         self._uptop_worker = None
         self._opening = False
-        self._current_tab = "post"  # Track current active tab
+        self._cur_tab = "group"  # Track current active tab
         self._total_groups = 0
         self._done_groups  = 0
+        self._chrome_hwnd = None  # Store Chrome window handle
+        self._chrome_container = None  # Store Chrome container widget
+        self._chrome_keep_alive_timer = None  # Timer để maintain embedding
 
         self._build()
-        QTimer.singleShot(500, self._open_chrome)
+        # Chrome sẽ được khởi động khi tab Browser được chuyển đến
 
     def closeEvent(self, e):
         if self._timer.isActive():
             self._timer.stop()
+        if self._chrome_keep_alive_timer is not None and self._chrome_keep_alive_timer.isActive():
+            self._chrome_keep_alive_timer.stop()
         if self._driver is not None:
             ChromiumDriver.close_driver(self._driver)
             self._driver = None
@@ -530,12 +1221,263 @@ class FacebookWindow(QMainWindow):
         if driver is not None:
             self._driver = driver
             print(f"[SUCCESS] ✅ Chrome đã mở cho {self.profile_name}", flush=True)
+            
+            # Nếu đang ở tab browser, nhúng Chrome vào
+            if self._cur_tab == "browser":
+                QTimer.singleShot(1000, self._embed_chrome_to_browser)
         else:
             self._driver = None
             print(f"[ERROR] ❌ Không mở được Chrome cho {self.profile_name}", flush=True)
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+
+    def _embed_chrome_to_browser(self):
+        """Nhúng Chrome window (win32gui approach)"""
+        try:
+            if self._driver is None:
+                print("[ERROR] No driver available", flush=True)
+                return
+            
+            print("[DEBUG] Bắt đầu nhúng Chrome...", flush=True)
+            
+            # Tìm Chrome window bằng class name
+            chrome_hwnd = self._find_chrome_window()
+            if not chrome_hwnd:
+                print("[ERROR] ❌ Không tìm thấy Chrome window", flush=True)
+                return
+            
+            print(f"[DEBUG] Tìm thấy Chrome HWND: {chrome_hwnd}", flush=True)
+            self._chrome_hwnd = chrome_hwnd
+            
+            if not self._chrome_container:
+                return
+            
+            # Get container HWND
+            container_hwnd = int(self._chrome_container.winId())
+            print(f"[DEBUG] Container HWND: {container_hwnd}", flush=True)
+            
+            # Clear layout
+            layout = self._chrome_container.layout()
+            if layout:
+                while layout.count():
+                    item = layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+            
+            # Nhúng Chrome
+            success = self._embed_window(chrome_hwnd, container_hwnd)
+            if success:
+                print("[SUCCESS] ✅ Chrome đã nhúng thành công", flush=True)
+                self._start_keep_alive()
+            else:
+                print("[ERROR] ❌ Lỗi nhúng Chrome", flush=True)
+                
+        except Exception as e:
+            print(f"[ERROR] Exception: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    def _find_chrome_window(self):
+        """Tìm ĐÚNG Chrome window do Selenium mở - dùng PID của driver"""
+        try:
+            import psutil
+
+            if self._driver is None:
+                return None
+
+            # Lấy PID của chromedriver
+            chromedriver_pid = self._driver.service.process.pid
+            print(f"[DEBUG] Chromedriver PID: {chromedriver_pid}", flush=True)
+
+            # Tìm TẤT CẢ chrome.exe là child của chromedriver này
+            chrome_pids = set()
+            try:
+                cd_proc = psutil.Process(chromedriver_pid)
+                for child in cd_proc.children(recursive=True):
+                    name = child.name().lower()
+                    if 'chrome.exe' in name:
+                        chrome_pids.add(child.pid)
+                        print(f"[DEBUG] Chrome child PID: {child.pid}", flush=True)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                print(f"[DEBUG] psutil error: {e}", flush=True)
+
+            if not chrome_pids:
+                print(f"[WARN] Không tìm thấy chrome child process từ chromedriver", flush=True)
+                return None
+
+            # Enum windows, chỉ lấy window thuộc chrome_pids
+            import ctypes
+            from ctypes import wintypes
+
+            found_windows = []
+
+            def enum_callback(hwnd, _):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return True
+                    class_name = win32gui.GetClassName(hwnd)
+                    if class_name not in ("Chrome_WidgetWin_1", "Chrome_WidgetWin_0"):
+                        return True
+
+                    # Lấy PID của window này
+                    pid_buf = ctypes.c_ulong()
+                    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_buf))
+                    win_pid = pid_buf.value
+
+                    # CHỈ lấy window thuộc chrome process do Selenium mở
+                    if win_pid not in chrome_pids:
+                        return True  # Bỏ qua VS Code, Electron apps khác
+
+                    rect = win32gui.GetWindowRect(hwnd)
+                    w = rect[2] - rect[0]
+                    h = rect[3] - rect[1]
+                    if w > 200 and h > 150:
+                        found_windows.append((hwnd, w * h))
+                        print(f"[DEBUG] Found Selenium Chrome window: HWND={hwnd} PID={win_pid} size={w}x{h}", flush=True)
+                except Exception:
+                    pass
+                return True
+
+            win32gui.EnumWindows(enum_callback, None)
+
+            if found_windows:
+                found_windows.sort(key=lambda x: x[1], reverse=True)
+                return found_windows[0][0]
+
+            print(f"[WARN] Không tìm thấy window nào khớp Chrome PID", flush=True)
+            return None
+
+        except Exception as e:
+            print(f"[ERROR] _find_chrome_window: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _embed_window(self, hwnd, parent_hwnd):
+        """Nhúng window sử dụng win32gui (LDPlayer approach)"""
+        try:
+            # Get original style
+            original_style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+            print(f"[DEBUG] Original style: {original_style}", flush=True)
+            
+            # Remove decorations, add CHILD style
+            new_style = original_style
+            new_style &= ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME | 
+                          win32con.WS_SYSMENU | win32con.WS_MINIMIZEBOX | 
+                          win32con.WS_MAXIMIZEBOX)
+            new_style |= win32con.WS_CHILD | win32con.WS_VISIBLE
+            
+            win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, new_style)
+            print(f"[DEBUG] Set style to: {new_style}", flush=True)
+            
+            # Set parent
+            win32gui.SetParent(hwnd, parent_hwnd)
+            print(f"[DEBUG] SetParent done", flush=True)
+            
+            # Get container size
+            rect = win32gui.GetClientRect(parent_hwnd)
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            
+            # Move and resize
+            win32gui.MoveWindow(hwnd, 0, 0, width, height, True)
+            print(f"[DEBUG] MoveWindow to 0, 0, {width}, {height}", flush=True)
+            
+            time.sleep(0.1)
+            
+            # Show
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.UpdateWindow(hwnd)
+            
+            time.sleep(0.1)
+            
+            # Redraw
+            win32gui.InvalidateRect(hwnd, None, True)
+            win32gui.RedrawWindow(hwnd, None, None, 
+                                 win32con.RDW_FRAME | 
+                                 win32con.RDW_INVALIDATE | 
+                                 win32con.RDW_UPDATENOW | 
+                                 win32con.RDW_ALLCHILDREN | 
+                                 win32con.RDW_ERASE)
+            
+            # Final position
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 
+                                 0, 0, width, height,
+                                 win32con.SWP_SHOWWINDOW | win32con.SWP_FRAMECHANGED)
+            
+            time.sleep(0.5)
+            
+            print(f"[SUCCESS] Embedding successful", flush=True)
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Lỗi embedding: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _start_keep_alive(self):
+        """Bắt đầu keep alive timer"""
+        if self._chrome_keep_alive_timer is None:
+            self._chrome_keep_alive_timer = QTimer(self)
+            self._chrome_keep_alive_timer.timeout.connect(self._keep_chrome_alive)
+        
+        if not self._chrome_keep_alive_timer.isActive():
+            self._chrome_keep_alive_timer.start(200)
+            print("[DEBUG] Keep alive timer started", flush=True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_chrome_size()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._sync_chrome_size()
+
+    def _sync_chrome_size(self):
+        try:
+            if self._chrome_hwnd is None or not self._chrome_container:
+                return
+            if not win32gui.IsWindow(self._chrome_hwnd):
+                self._chrome_hwnd = None
+                return
+            container_hwnd = int(self._chrome_container.winId())
+            rect = win32gui.GetClientRect(container_hwnd)
+            w, h = rect[2] - rect[0], rect[3] - rect[1]
+            if w > 0 and h > 0:
+                win32gui.MoveWindow(self._chrome_hwnd, 0, 0, w, h, True)
+                win32gui.SetWindowPos(
+                    self._chrome_hwnd,
+                    win32con.HWND_TOP,
+                    0, 0, w, h,
+                    win32con.SWP_SHOWWINDOW
+                )
+        except Exception:
+            pass
+
+    def _keep_chrome_alive(self):
+        try:
+            if self._chrome_hwnd is None or not self._chrome_container:
+                return
+            if not win32gui.IsWindow(self._chrome_hwnd):
+                self._chrome_hwnd = None
+                self._chrome_keep_alive_timer.stop()
+                return
+            container_hwnd = int(self._chrome_container.winId())
+            current_parent = win32gui.GetParent(self._chrome_hwnd)
+            if current_parent != container_hwnd:
+                win32gui.SetParent(self._chrome_hwnd, container_hwnd)
+            rect = win32gui.GetClientRect(container_hwnd)
+            w, h = rect[2] - rect[0], rect[3] - rect[1]
+            if w > 0 and h > 0:
+                cr = win32gui.GetWindowRect(self._chrome_hwnd)
+                if (cr[2] - cr[0]) != w or (cr[3] - cr[1]) != h:
+                    win32gui.MoveWindow(self._chrome_hwnd, 0, 0, w, h, True)
+            if not win32gui.IsWindowVisible(self._chrome_hwnd):
+                win32gui.ShowWindow(self._chrome_hwnd, win32con.SW_SHOW)
+        except Exception:
+            pass
 
     def _build(self):
         central = QWidget()
@@ -550,8 +1492,9 @@ class FacebookWindow(QMainWindow):
         self._pg_group    = self._build_group()
         self._pg_page     = self._build_page()
         self._pg_settings = self._build_settings()
+        self._pg_browser  = self._build_browser()
 
-        for p in [self._pg_group, self._pg_page, self._pg_settings]:
+        for p in [self._pg_group, self._pg_page, self._pg_settings, self._pg_browser]:
             root.addWidget(p)
 
         sb = QStatusBar()
@@ -592,8 +1535,17 @@ class FacebookWindow(QMainWindow):
         lay.addWidget(fb_badge)
         lay.addWidget(lbl)
         lay.addSpacing(12)
-        lay.addWidget(pill("Nội dung", "#40a02b"))
-        lay.addWidget(pill("Cấu hình AI", "#1e66f5"))
+        
+        # Nút "Nội dung" - mở ContentViewerDialog
+        btn_content = pill("Nội dung", "#40a02b")
+        btn_content.clicked.connect(self._open_content_viewer)
+        lay.addWidget(btn_content)
+        
+        # Nút "Cấu hình AI"
+        btn_ai_cfg = pill("Cấu hình AI", "#1e66f5")
+        btn_ai_cfg.clicked.connect(self._open_ai_config)
+        lay.addWidget(btn_ai_cfg)
+        
         lay.addStretch()
         return h
 
@@ -607,7 +1559,8 @@ class FacebookWindow(QMainWindow):
         self._tb = {}
         for key, txt in [("group",    "  ĐĂNG NHÓM  "),
                           ("page",     "  ĐĂNG PAGE  "),
-                          ("settings", "  CÁCH CANH  ")]:
+                          ("settings", "  CÁCH CANH  "),
+                          ("browser",  "  🌐 TRÌNH DUYỆT  ")]:
             b = QPushButton(txt)
             b.setFixedHeight(44)
             b.setMinimumWidth(148)
@@ -622,6 +1575,20 @@ class FacebookWindow(QMainWindow):
         self._pg_group.setVisible(tab == "group")
         self._pg_page.setVisible(tab == "page")
         self._pg_settings.setVisible(tab == "settings")
+        self._pg_browser.setVisible(tab == "browser")
+        
+        # Handle Chrome lifecycle
+        if tab == "browser":
+            if self._driver is None and not self._opening:
+                self._open_chrome()
+            elif self._driver is not None and self._chrome_hwnd is None:
+                QTimer.singleShot(500, self._embed_chrome_to_browser)
+            elif self._chrome_hwnd is not None and (self._chrome_keep_alive_timer is None or not self._chrome_keep_alive_timer.isActive()):
+                self._start_keep_alive()
+        else:
+            # Stop keep alive timer when leaving browser tab
+            if self._chrome_keep_alive_timer is not None and self._chrome_keep_alive_timer.isActive():
+                self._chrome_keep_alive_timer.stop()
 
         ACT = ("QPushButton{background:#1e1e2e;color:#89b4fa;border:none;"
                "border-bottom:2px solid #89b4fa;font-weight:bold;font-size:13px;"
@@ -662,20 +1629,26 @@ class FacebookWindow(QMainWindow):
             "QLineEdit{background:#313244;border:1px solid #45475a;"
             "border-radius:4px;padding:2px 10px;font-size:12px;color:#cdd6f4;}"
             "QLineEdit:focus{border-color:#89b4fa;}")
-        fb_btn = QPushButton("Lọc")
-        fb_btn.setFixedSize(52, 28)
+        fb_btn = QPushButton("⬇  Lọc")
+        fb_btn.setFixedSize(80, 28)
         fb_btn.setStyleSheet(BTN_GRAY)
+        fb_btn.clicked.connect(self._open_filter_menu)
+        fb_btn.setVisible(False)  # ẨN BUTTON LỌC
         fr.addWidget(fi, 1)
         fr.addWidget(fb_btn)
         lay.addLayout(fr)
 
         self._gt = QTableWidget()
-        self._gt.setColumnCount(4)
-        self._gt.setHorizontalHeaderLabels(["✓", "#", "ID Nhóm", "Tên Nhóm"])
-        self._gt.horizontalHeader().setStretchLastSection(True)
+        self._gt.setColumnCount(6)
+        self._gt.setHorizontalHeaderLabels(["✓", "#", "ID Nhóm", "Tên Nhóm", "Số lần", "Ngày chạy"])
+        self._gt.horizontalHeader().setStretchLastSection(False)
         self._gt.setColumnWidth(0, 30)
         self._gt.setColumnWidth(1, 32)
         self._gt.setColumnWidth(2, 90)
+        self._gt.setColumnWidth(4, 60)
+        self._gt.setColumnWidth(5, 95)
+        self._gt.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._gt.setMinimumHeight(350)
         self._gt.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._gt.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._gt.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -808,6 +1781,15 @@ class FacebookWindow(QMainWindow):
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self._suc.setItem(r, j, item)
             self._suc.scrollToBottom()
+            
+            # Cập nhật thống kê nhóm
+            # Tìm group_url từ group_name
+            for i in range(self._gt.rowCount()):
+                if self._gt.item(i, 3) and self._gt.item(i, 3).text() == group_name:
+                    group_url = self._gt.item(i, 2).text() if self._gt.item(i, 2) else ''
+                    if group_url:
+                        self._update_group_stats(group_url, success=True)
+                    break
         except Exception as e:
             print(f"[ERROR] _on_post_success: {e}", flush=True)
 
@@ -854,6 +1836,15 @@ class FacebookWindow(QMainWindow):
             self._done_groups += 1
             self._update_progress()
             self._log_msg(f'<span style="color:#a6e3a1;font-size:11px;">[{ts}] ✅ Bình luận thành công: {group_name}</span>')
+            
+            # Cập nhật thống kê nhóm
+            # Tìm group_url từ group_name
+            for i in range(self._gt.rowCount()):
+                if self._gt.item(i, 3) and self._gt.item(i, 3).text() == group_name:
+                    group_url = self._gt.item(i, 2).text() if self._gt.item(i, 2) else ''
+                    if group_url:
+                        self._update_group_stats(group_url, success=True)
+                    break
         except Exception as e:
             print(f"[ERROR] _on_cmt_success: {e}", flush=True)
 
@@ -915,6 +1906,20 @@ class FacebookWindow(QMainWindow):
             self._done_groups += 1
             self._update_progress()
             self._log_msg(f'<span style="color:#a6e3a1;font-size:11px;">[{ts}] ✅ Up top thành công: {action_name}</span>')
+            
+            # Cập nhật thống kê nhóm - extract group ID từ post_url
+            # Format: https://www.facebook.com/groups/{group_id}/posts/{post_id}
+            if 'groups/' in post_url:
+                parts = post_url.split('groups/')
+                if len(parts) > 1:
+                    group_id = parts[1].split('/')[0]
+                    # Tìm group URL từ group_id hoặc sử dụng group_id trực tiếp
+                    for i in range(self._gt.rowCount()):
+                        if self._gt.item(i, 2):
+                            item_url = self._gt.item(i, 2).text()
+                            if group_id in item_url:
+                                self._update_group_stats(item_url, success=True)
+                                break
         except Exception as e:
             print(f"[ERROR] _on_uptop_success: {e}", flush=True)
 
@@ -945,6 +1950,240 @@ class FacebookWindow(QMainWindow):
             self._uptop_worker.deleteLater()
             self._uptop_worker = None
 
+    # ──────────────────────────────────────────────────────────────
+    # Hàm mở Dialog Cấu hình AI
+    # ──────────────────────────────────────────────────────────────
+    def _open_ai_config(self):
+        """Mở dialog cấu hình AI cho profile hiện tại"""
+        dialog = AIConfigDialog(self.profile_name, self)
+        dialog.exec_()
+
+    # ──────────────────────────────────────────────────────────────
+    # Xem trước AI làm lại nội dung
+    # ──────────────────────────────────────────────────────────────
+    def _preview_ai_content(self, mode: str):
+        """Preview AI sẽ làm lại nội dung như thế nào"""
+        content = self._content.toPlainText().strip()
+        if not content:
+            QMessageBox.warning(self, "⚠️ Cảnh báo", "Chưa nhập nội dung để preview!")
+            return
+        
+        # Load AI config
+        ai_config = self._get_ai_config()
+        if not ai_config or not ai_config.get('groq_key') or not ai_config.get('ai_prompt'):
+            QMessageBox.warning(self, "⚠️ Cảnh báo", "Chưa cấu hình AI!\n\nHãy click 'Cấu hình AI' trước.")
+            return
+        
+        # Gọi AI
+        try:
+            self._log_msg(f'<span style="color:#89b4fa;font-size:11px;">[INFO] 🤖 Đang gọi AI để xem trước...</span>')
+            from AI.chatAI import generate_ai_content
+            ai_result = generate_ai_content(content, ai_config)
+            
+            # Hiển thị dialog preview
+            preview_dialog = QDialog(self)
+            preview_dialog.setWindowTitle("👁 XEM TRƯỚC AI XỬ LÝ NỘI DUNG")
+            preview_dialog.setFixedSize(600, 400)
+            preview_dialog.setStyleSheet(DARK)
+            
+            layout = QVBoxLayout(preview_dialog)
+            layout.setSpacing(10)
+            layout.setContentsMargins(15, 15, 15, 15)
+            
+            # Tiêu đề
+            lbl_title = QLabel("📝  So Sánh Nội Dung")
+            lbl_title.setFont(QFont("Segoe UI", 12, QFont.Bold))
+            lbl_title.setStyleSheet("color:#89b4fa;background:transparent;")
+            layout.addWidget(lbl_title)
+            
+            # Splitter để hiển thị 2 bên
+            splitter = QWidget()
+            splitter_lay = QHBoxLayout(splitter)
+            splitter_lay.setSpacing(10)
+            splitter_lay.setContentsMargins(0, 0, 0, 0)
+            
+            # Bên trái: Nội dung gốc
+            left_lay = QVBoxLayout()
+            lbl_left = QLabel("📌 Nội Dung Gốc")
+            lbl_left.setStyleSheet("color:#a6e3a1;font-weight:bold;font-size:11px;background:transparent;")
+            left_lay.addWidget(lbl_left)
+            text_left = QTextEdit()
+            text_left.setPlainText(content)
+            text_left.setReadOnly(True)
+            text_left.setStyleSheet(
+                "QTextEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+                "font-size:12px;color:#a6adc8;padding:8px;}")
+            left_lay.addWidget(text_left)
+            
+            # Bên phải: Nội dung AI làm
+            right_lay = QVBoxLayout()
+            lbl_right = QLabel("🤖 AI Làm Lại")
+            lbl_right.setStyleSheet("color:#89b4fa;font-weight:bold;font-size:11px;background:transparent;")
+            right_lay.addWidget(lbl_right)
+            text_right = QTextEdit()
+            text_right.setPlainText(ai_result)
+            text_right.setReadOnly(True)
+            text_right.setStyleSheet(
+                "QTextEdit{background:#181825;border:1px solid #45475a;border-radius:4px;"
+                "font-size:12px;color:#89b4fa;padding:8px;}")
+            right_lay.addWidget(text_right)
+            
+            splitter_lay.addLayout(left_lay, 1)
+            splitter_lay.addLayout(right_lay, 1)
+            layout.addWidget(splitter)
+            
+            # Nút hành động
+            btn_lay = QHBoxLayout()
+            
+            btn_copy = QPushButton("📋 Copy AI Result")
+            btn_copy.setFixedHeight(32)
+            btn_copy.setStyleSheet(BTN_BLUE(12, 8))
+            btn_copy.clicked.connect(lambda: self._copy_to_clipboard(ai_result))
+            
+            btn_accept = QPushButton("✅ Dùng Nội Dung AI")
+            btn_accept.setFixedHeight(32)
+            btn_accept.setStyleSheet(BTN_BLUE(12, 8))
+            btn_accept.clicked.connect(lambda: self._use_ai_result(ai_result, preview_dialog))
+            
+            btn_close = QPushButton("✕ Đóng")
+            btn_close.setFixedHeight(32)
+            btn_close.setStyleSheet(BTN_GRAY)
+            btn_close.clicked.connect(preview_dialog.reject)
+            
+            btn_lay.addWidget(btn_copy)
+            btn_lay.addWidget(btn_accept)
+            btn_lay.addStretch()
+            btn_lay.addWidget(btn_close)
+            layout.addLayout(btn_lay)
+            
+            preview_dialog.exec_()
+            self._log_msg(f'<span style="color:#a6e3a1;font-size:11px;">[OK] Preview hoàn thành</span>')
+            
+        except Exception as e:
+            self._log_msg(f'<span style="color:#f38ba8;font-size:11px;">[ERROR] Lỗi preview: {str(e)[:60]}</span>')
+            QMessageBox.critical(self, "❌ Lỗi", f"Lỗi khi gọi AI:\n\n{str(e)}")
+    
+    def _copy_to_clipboard(self, text: str):
+        """Copy nội dung vào clipboard"""
+        import subprocess
+        try:
+            process = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
+            process.communicate(text.encode('utf-8'))
+            QMessageBox.information(self, "✅ Thành công", "Đã copy vào clipboard!")
+        except Exception as e:
+            QMessageBox.critical(self, "❌ Lỗi", f"Copy lỗi: {e}")
+    
+    def _use_ai_result(self, ai_result: str, dialog):
+        """Dùng nội dung AI, replace vào ô nội dung"""
+        self._content.setPlainText(ai_result)
+        dialog.accept()
+        self._log_msg(f'<span style="color:#a6e3a1;font-size:11px;">[OK] ✅ Đã cập nhật nội dung từ AI</span>')
+
+    # ──────────────────────────────────────────────────────────────
+    # Hàm mở Dialog Quản lý Nội dung
+    # ──────────────────────────────────────────────────────────────
+    def _open_content_viewer(self):
+        """Mở dialog quản lý nội dung - thêm, xem, copy"""
+        dialog = ContentManagerDialog(self.profile_name, self)
+        dialog.exec_()
+
+    def _get_ai_config(self) -> dict:
+        """Load AI config từ file JSON"""
+        try:
+            base = os.path.dirname(os.path.abspath(__file__))
+            data_dir = os.path.join(base, "data")
+            config_file = os.path.join(data_dir, f"ai_config_{self.profile_name}.json")
+            
+            print(f"[DEBUG] Loading AI config from: {config_file}")
+            print(f"[DEBUG] File exists: {os.path.isfile(config_file)}")
+            
+            if os.path.isfile(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    print(f"[DEBUG] AI Config loaded: api_key={'***' if config.get('api_key') else 'NOT SET'}, prompt_len={len(config.get('prompt', ''))}, model={config.get('model')}")
+                    return config
+            else:
+                print(f"[WARN] AI config file not found: {config_file}")
+        except Exception as e:
+            print(f"[ERROR] Load AI config failed: {e}")
+        
+        print(f"[WARN] Returning empty AI config")
+        return {}
+
+    def _spin_content_simple(self, text: str) -> str:
+        """
+        Spin content đơn giản - chọn ngẫu nhiên từ các đoạn cách nhau bằng |  và {} 
+        Ví dụ: 'A | B | C' → chọn 1 trong 3
+                'Bán {nhà|đất|app}' → chọn 1 trong 3
+        """
+        if not text or len(text.strip()) == 0:
+            return text
+        
+        import re
+        
+        # Bước 1: Chọn segment nếu có |
+        segments = text.split(' | ')
+        if len(segments) > 1:
+            chosen = random.choice(segments).strip()
+            self._log_msg(f'<span style="color:#fab387;font-size:11px;">'
+                         f'[SPIN] Chọn đoạn 1/{len(segments)}</span>')
+        else:
+            chosen = text.strip()
+        
+        # Bước 2: Spin {var1|var2|var3}
+        def replacer(m):
+            choices = m.group(1).split('|')
+            return random.choice(choices).strip()
+        
+        result = re.sub(r'\{([^}]+)\}', replacer, chosen)
+        return result
+
+    def _process_content_with_ai(self, content: str, use_ai_checkbox=None) -> str:
+        """
+        Xử lý nội dung với AI nếu checkbox được tick + SPIN nội dung
+        
+        Args:
+            content: Nội dung cần xử lý
+            use_ai_checkbox: QCheckBox object (nếu None, dùng self._chk_ai)
+        
+        Returns: Nội dung được xử lý + spin hoặc nội dung gốc nếu lỗi
+        """
+        # Xác định checkbox
+        chk = use_ai_checkbox if use_ai_checkbox else self._chk_ai
+        
+        # Kiểm tra checkbox
+        if not chk.isChecked():
+            # Không dùng AI, nhưng vẫn SPIN content
+            return self._spin_content_simple(content)
+        
+        # Load AI config
+        ai_config = self._get_ai_config()
+        if not ai_config or not ai_config.get('groq_key'):
+            self._log_msg(f'<span style="color:#fab387;font-size:11px;">'
+                         f'[WARN] AI chưa cấu hình, dùng nội dung gốc + spin</span>')
+            return self._spin_content_simple(content)
+        
+        # Gọi AI để xử lý nội dung
+        try:
+            self._log_msg(f'<span style="color:#89b4fa;font-size:11px;">'
+                         f'[INFO] 🤖 Đang gọi AI để xử lý nội dung...</span>')
+            
+            processed = generate_ai_content(content, ai_config)
+            
+            if processed and processed != content:
+                self._log_msg(f'<span style="color:#a6e3a1;font-size:11px;">'
+                             f'[OK] AI xử lý xong</span>')
+            else:
+                processed = content
+            
+            # SPIN nội dung sau khi xử lý AI
+            final = self._spin_content_simple(processed)
+            return final
+            
+        except Exception as e:
+            self._log_msg(f'<span style="color:#f38ba8;font-size:11px;">'
+                         f'[ERROR] AI failed: {str(e)[:60]}</span>')
+            return self._spin_content_simple(content)
 
     def _load_groups(self):
         groups = []
@@ -959,6 +2198,9 @@ class FacebookWindow(QMainWindow):
                         break
             except Exception as e:
                 print(f"[ERROR] Lỗi load groups: {e}", flush=True)
+
+        # Load thống kê nhóm
+        stats = self._load_group_stats()
 
         self._gt.setRowCount(len(groups))
         for i, g in enumerate(groups):
@@ -976,7 +2218,127 @@ class FacebookWindow(QMainWindow):
                 gnm  = g[1] if len(g) > 1 else ''
             self._gt.setItem(i, 2, QTableWidgetItem(gurl))
             self._gt.setItem(i, 3, QTableWidgetItem(gnm))
+            
+            # Cột số lần chạy
+            run_count = stats.get(gurl, {}).get('run_count', 0)
+            self._gt.setItem(i, 4, QTableWidgetItem(str(run_count)))
+            
+            # Cột lần chạy gần nhất
+            last_run = stats.get(gurl, {}).get('last_run', '-')
+            self._gt.setItem(i, 5, QTableWidgetItem(str(last_run)))
+            
             self._gt.setRowHeight(i, 28)
+
+    def _get_group_stats_file(self) -> str:
+        """Đường dẫn file lưu thống kê nhóm"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        data = os.path.join(base, "data")
+        os.makedirs(data, exist_ok=True)
+        return os.path.join(data, f"group_stats_{self.profile_name}.json")
+
+    def _load_group_stats(self) -> dict:
+        """Load thống kê nhóm từ file JSON"""
+        stats_file = self._get_group_stats_file()
+        if os.path.isfile(stats_file):
+            try:
+                with open(stats_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[STATS] Load lỗi: {e}")
+        return {}
+
+    def _save_group_stats(self, stats: dict):
+        """Lưu thống kê nhóm vào file JSON"""
+        stats_file = self._get_group_stats_file()
+        try:
+            with open(stats_file, 'w', encoding='utf-8') as f:
+                json.dump(stats, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[STATS] Save lỗi: {e}")
+
+    def _update_group_stats(self, group_url: str, success: bool = True):
+        """Cập nhật thống kê khi chạy xong 1 nhóm"""
+        stats = self._load_group_stats()
+        if group_url not in stats:
+            stats[group_url] = {'run_count': 0, 'last_run': '-'}
+        
+        if success:
+            stats[group_url]['run_count'] = stats[group_url].get('run_count', 0) + 1
+            stats[group_url]['last_run'] = datetime.now().strftime("%d/%m/%Y")
+        
+        self._save_group_stats(stats)
+        self._load_groups()  # Reload để update UI
+
+    def _open_filter_menu(self):
+        """Mở dialog lọc nhóm"""
+        dialog = GroupFilterDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            filters = dialog.get_filters()
+            if filters:
+                self._apply_group_filters(filters)
+
+    def _apply_group_filters(self, filters: list):
+        """Lọc nhóm theo tiêu chí đã chọn"""
+        if not filters:
+            return
+        
+        stats = self._load_group_stats()
+        
+        # Thu thập dữ liệu tất cả nhóm
+        all_data = []
+        for i in range(self._gt.rowCount()):
+            run_count = int(self._gt.item(i, 4).text()) if self._gt.item(i, 4) else 0
+            all_data.append({
+                'row': i,
+                'url': self._gt.item(i, 2).text() if self._gt.item(i, 2) else '',
+                'run_count': run_count,
+                'last_run': self._gt.item(i, 5).text() if self._gt.item(i, 5) else '-',
+                'has_run': run_count > 0
+            })
+        
+        # Tính toán thống kê
+        run_counts = [d['run_count'] for d in all_data if d['has_run']]
+        median = sorted(run_counts)[len(run_counts)//2] if run_counts else 0
+        max_count = max(run_counts) if run_counts else 0
+        min_count = min(run_counts) if run_counts else 0
+        
+        rows_to_check = set()
+        
+        for filter_code in filters:
+            if filter_code == "recent":
+                # Lấy nhóm đã chạy gần nhất (có last_run)
+                recent_rows = [d['row'] for d in all_data if d['last_run'] != '-']
+                if recent_rows:
+                    # Lấy 50% nhóm được chạy gần nhất (run_count cao)
+                    threshold = median if median > 0 else 1
+                    rows_to_check.update([d['row'] for d in all_data if d['run_count'] >= threshold])
+            
+            elif filter_code == "oldest":
+                # Lấy nhóm chạy từ lâu nhất (run_count thấp nhưng > 0)
+                if run_counts:
+                    threshold = median if median > 0 else 1
+                    rows_to_check.update([d['row'] for d in all_data if 0 < d['run_count'] < threshold])
+            
+            elif filter_code == "least":
+                # Lấy nhóm chạy ít nhất (run_count = 1 hoặc gần nhất)
+                if run_counts:
+                    rows_to_check.update([d['row'] for d in all_data if d['run_count'] == min_count])
+            
+            elif filter_code == "most":
+                # Lấy nhóm chạy nhiều nhất (run_count cao)
+                if run_counts:
+                    threshold = max(min_count, max_count - 3) if max_count > 0 else 0
+                    rows_to_check.update([d['row'] for d in all_data if d['run_count'] >= threshold])
+            
+            elif filter_code == "never":
+                # Lấy nhóm chưa chạy lần nào
+                rows_to_check.update([d['row'] for d in all_data if d['run_count'] == 0])
+        
+        # Áp dụng check vào bảng
+        for i in range(self._gt.rowCount()):
+            chk = self._gt.cellWidget(i, 0)
+            if isinstance(chk, QCheckBox):
+                chk.setChecked(i in rows_to_check)
 
     def _group_menu(self, pos):
         m = QMenu(self)
@@ -1152,21 +2514,34 @@ class FacebookWindow(QMainWindow):
         r1 = QHBoxLayout()
         self._chk_ai = QCheckBox("Dùng AI viết lại bài")
         self._chk_ai.setChecked(True)
-        self._chk_ai.setEnabled(False)
-        self._chk_ai.setVisible(False)
+        self._chk_ai.setEnabled(True)
+        self._chk_ai.setVisible(True)
+        
         ba = QPushButton("⚙ Cấu hình AI")
         ba.setFixedHeight(28)
         ba.setStyleSheet(BTN_BLUE(12, 6))
-        ba.setEnabled(False)
-        ba.setVisible(False)
+        ba.setEnabled(True)
+        ba.setVisible(True)
+        ba.clicked.connect(self._open_ai_config)
+        
+        bp = QPushButton("👁 Xem trước AI")
+        bp.setFixedHeight(28)
+        bp.setStyleSheet(BTN_GRAY)
+        bp.setEnabled(True)
+        bp.setVisible(True)
+        bp.clicked.connect(lambda: self._preview_ai_content("post"))
+        
         bc = QPushButton("📄 Chọn nội dung")
         bc.setFixedHeight(28)
         bc.setStyleSheet(BTN_GRAY)
-        bc.setEnabled(False)
-        bc.setVisible(False)
+        bc.setEnabled(True)
+        bc.setVisible(True)
+        bc.clicked.connect(self._open_content_viewer)
+        
         r1.addWidget(self._chk_ai)
         r1.addStretch()
         r1.addWidget(ba)
+        r1.addWidget(bp)
         r1.addWidget(bc)
         lay.addLayout(r1)
 
@@ -1280,6 +2655,35 @@ class FacebookWindow(QMainWindow):
         r1.addWidget(self._cmt_count)
         r1.addStretch()
         lay.addLayout(r1)
+
+        # AI для comment
+        r_ai = QHBoxLayout()
+        self._cmt_chk_ai = QCheckBox("Dùng AI viết lại comment")
+        self._cmt_chk_ai.setChecked(True)
+        self._cmt_chk_ai.setVisible(True)
+        self._cmt_chk_ai.setEnabled(True)
+        
+        ba_cmt = QPushButton("⚙ Cấu hình AI")
+        ba_cmt.setFixedHeight(28)
+        ba_cmt.setStyleSheet(BTN_BLUE(12, 6))
+        ba_cmt.clicked.connect(self._open_ai_config)
+        
+        bp_cmt = QPushButton("👁 Xem trước AI")
+        bp_cmt.setFixedHeight(28)
+        bp_cmt.setStyleSheet(BTN_GRAY)
+        bp_cmt.clicked.connect(lambda: self._preview_ai_content("comment"))
+        
+        bc_cmt = QPushButton("📄 Chọn nội dung")
+        bc_cmt.setFixedHeight(28)
+        bc_cmt.setStyleSheet(BTN_GRAY)
+        bc_cmt.clicked.connect(self._open_content_viewer)
+        
+        r_ai.addWidget(self._cmt_chk_ai)
+        r_ai.addStretch()
+        r_ai.addWidget(ba_cmt)
+        r_ai.addWidget(bp_cmt)
+        r_ai.addWidget(bc_cmt)
+        lay.addLayout(r_ai)
 
         # r2: Ẩn options random ảnh cho comment
         r2 = QHBoxLayout()
@@ -1502,6 +2906,8 @@ class FacebookWindow(QMainWindow):
             delay_min = self._cmt_sp_d1.value()
             delay_max = self._cmt_sp_d2.value()
             cmt_count = self._cmt_count.value()
+            use_ai = self._cmt_chk_ai.isChecked()
+            ai_config = self._get_ai_config()
 
             data = {
                 'profile':      self.profile_name,
@@ -1513,6 +2919,8 @@ class FacebookWindow(QMainWindow):
                 'cmt_count':    cmt_count,
                 'delay_min':    delay_min,
                 'delay_max':    delay_max,
+                'use_ai':       use_ai,
+                'ai_config':    ai_config,
             }
 
             ts = datetime.now().strftime("%H:%M:%S")
@@ -1544,6 +2952,8 @@ class FacebookWindow(QMainWindow):
             random_media_count = self._spin_med.value() if use_random_media else 1
             delay_min = self._sp_d1.value()
             delay_max = self._sp_d2.value()
+            use_ai = self._chk_ai.isChecked()
+            ai_config = self._get_ai_config()
 
             data = {
                 'profile':      self.profile_name,
@@ -1554,6 +2964,8 @@ class FacebookWindow(QMainWindow):
                 'media_count':  random_media_count,
                 'delay_min':    delay_min,
                 'delay_max':    delay_max,
+                'use_ai':       use_ai,
+                'ai_config':    ai_config,
             }
 
             ts = datetime.now().strftime("%H:%M:%S")
@@ -1594,6 +3006,8 @@ class FacebookWindow(QMainWindow):
             cmt_count = self._uptop_cmt_count.value()
             delay_min = self._sp_ut1.value()
             delay_max = self._sp_ut2.value()
+            use_ai = self._chk_ai.isChecked()
+            ai_config = self._get_ai_config()
 
             data = {
                 'profile':      self.profile_name,
@@ -1603,6 +3017,8 @@ class FacebookWindow(QMainWindow):
                 'cmt_count':    cmt_count,
                 'delay_min':    delay_min,
                 'delay_max':    delay_max,
+                'use_ai':       use_ai,
+                'ai_config':    ai_config,
             }
 
             ts = datetime.now().strftime("%H:%M:%S")
@@ -1962,6 +3378,35 @@ class FacebookWindow(QMainWindow):
         info.setStyleSheet("color:#a6adc8;background:transparent;font-size:12px;")
         lay.addWidget(info)
         lay.addStretch()
+        return w
+
+    def _build_browser(self):
+        w = QWidget()
+        w.setStyleSheet("background:#1e1e2e;")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Container for Chrome
+        self._chrome_container = ResizableContainer()
+        self._chrome_container.resized.connect(self._sync_chrome_size)
+        self._chrome_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._chrome_container.setStyleSheet("background:#000000;")
+        self._chrome_container.setAttribute(Qt.WA_NativeWindow)
+        self._chrome_container.setAttribute(Qt.WA_DontCreateNativeAncestors)
+        
+        container_layout = QVBoxLayout(self._chrome_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        
+        # Status label
+        self._chrome_status = QLabel("⏳  Khởi động Chrome...")
+        self._chrome_status.setAlignment(Qt.AlignCenter)
+        self._chrome_status.setStyleSheet("color:#89b4fa;font-size:14px;background:transparent;")
+        container_layout.addWidget(self._chrome_status)
+        
+        lay.addWidget(self._chrome_container, 1)
+
         return w
 
 

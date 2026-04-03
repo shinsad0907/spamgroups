@@ -12,6 +12,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from AI.chatAI import generate_ai_content
 
 
 class PostGroups:
@@ -28,6 +29,8 @@ class PostGroups:
         self.media_count  = data.get('media_count', 1)
         self.delay_min    = data.get('delay_min', 5)
         self.delay_max    = data.get('delay_max', 10)
+        self.use_ai       = data.get('use_ai', False)
+        self.ai_config    = data.get('ai_config', {})
 
         self.log_callback     = log_callback
         self.success_callback = success_callback
@@ -777,6 +780,27 @@ class PostGroups:
             media_paths = [media_paths]
         media_paths = media_paths or []
 
+        # ── Xử lý nội dung với AI nếu được enable ─────────────────
+        final_content = content
+        if self.use_ai and self.ai_config:
+            try:
+                self._log("[INFO] 🤖 Đang gọi AI để xử lý nội dung...")
+                self._log(f"[DEBUG] BEFORE AI: '{content}'")
+                final_content = generate_ai_content(content, self.ai_config)
+                self._log(f"[DEBUG] AFTER AI:  '{final_content}'")
+                self._log(f"[DEBUG] CHANGED:   {final_content != content}")
+                if final_content and final_content.strip():
+                    self._log(f"[OK] AI xử lý xong: {final_content[:60]}...")
+                else:
+                    self._log("[WARN] AI trả về nội dung rỗng, dùng nội dung gốc")
+                    final_content = content
+            except Exception as e:
+                self._log(f"[ERROR] AI call failed: {e}, dùng nội dung gốc")
+                final_content = content
+        
+        # ── Spin content ──────────────────────────────────────────
+        final_content = self._spin_content(final_content)
+
         valid_paths = []
         for p in media_paths:
             normalized = str(Path(p).resolve())
@@ -802,7 +826,7 @@ class PostGroups:
             )
             self.driver.execute_script("arguments[0].click();", textarea)
             time.sleep(0.5)
-            textarea.send_keys(content)
+            textarea.send_keys(final_content)
             self._log("[OK] Đã nhập nội dung")
         except Exception as e:
             self._log(f"[WARN] Thử nhập text qua ActionChains: {e}")
@@ -817,7 +841,7 @@ class PostGroups:
                     }
                 """)
                 time.sleep(0.5)
-                ActionChains(self.driver).send_keys(content).perform()
+                ActionChains(self.driver).send_keys(final_content).perform()
                 self._log("[OK] Đã nhập nội dung qua ActionChains")
             except Exception as e2:
                 self._log(f"[ERROR] Không nhập được text: {e2}")
