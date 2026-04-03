@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QMenu, QAction, QHeaderView,
     QListWidget, QListWidgetItem, QSizePolicy, QComboBox, QScrollArea, QButtonGroup
 )
-from PyQt5.QtCore import Qt, QTimer, QRect, pyqtSignal, QThread
+from PyQt5.QtCore import Qt, QTimer, QRect, pyqtSignal, QThread, QObject, QEvent
 from PyQt5.QtGui import QFont, QColor, QBrush
 
 import win32gui
@@ -185,6 +185,73 @@ QMenuBar {
     color: #cdd6f4;
 }
 """
+
+class ChromeKeyboardFilter(QObject):
+    """Forward keyboard events từ PyQt container sang Chrome window"""
+    
+    def __init__(self, chrome_hwnd_getter):
+        super().__init__()
+        self.chrome_hwnd_getter = chrome_hwnd_getter
+        # Map Qt key codes sang Windows Virtual Key codes
+        self.vk_map = {
+            Qt.Key_Return: 0x0D,
+            Qt.Key_Enter: 0x0D,
+            Qt.Key_Tab: 0x09,
+            Qt.Key_Backspace: 0x08,
+            Qt.Key_Delete: 0x2E,
+            Qt.Key_Escape: 0x1B,
+            Qt.Key_Left: 0x25,
+            Qt.Key_Right: 0x27,
+            Qt.Key_Up: 0x26,
+            Qt.Key_Down: 0x28,
+            Qt.Key_Home: 0x24,
+            Qt.Key_End: 0x23,
+            Qt.Key_PageUp: 0x21,
+            Qt.Key_PageDown: 0x22,
+            Qt.Key_Insert: 0x2D,
+            Qt.Key_Control: 0xA2,
+            Qt.Key_Shift: 0xA0,
+            Qt.Key_Alt: 0xA4,
+            Qt.Key_Space: 0x20,
+        }
+    
+    def eventFilter(self, obj, event):
+        chrome_hwnd = self.chrome_hwnd_getter()
+        
+        if not chrome_hwnd:
+            return False
+        
+        if event.type() == QEvent.KeyPress:
+            return self._forward_keypress(event, chrome_hwnd)
+        
+        return False
+    
+    def _forward_keypress(self, event, hwnd):
+        """Forward keyboard event sang Chrome"""
+        try:
+            text = event.text()
+            qkey = event.key()
+            
+            # Nếu là printable character, send WM_CHAR
+            if text and ord(text[0]) >= 32 and ord(text[0]) != 127:
+                # Send char
+                win32gui.PostMessage(hwnd, 0x0102, ord(text[0]), 0)  # WM_CHAR
+                return True
+            
+            # Nếu là special key, send WM_KEYDOWN
+            vk = self.vk_map.get(qkey)
+            if vk:
+                # WM_KEYDOWN
+                win32gui.PostMessage(hwnd, 0x0100, vk, 0)
+                # WM_KEYUP
+                win32gui.PostMessage(hwnd, 0x0101, vk, 0)
+                return True
+            
+        except Exception as e:
+            print(f"[DEBUG] Keyboard forward error: {e}", flush=True)
+        
+        return False
+
 
 class ResizableContainer(QWidget):
     resized = pyqtSignal()
@@ -1406,7 +1473,16 @@ class FacebookWindow(QMainWindow):
                                  0, 0, width, height,
                                  win32con.SWP_SHOWWINDOW | win32con.SWP_FRAMECHANGED)
             
-            time.sleep(0.5)
+            time.sleep(0.2)
+            
+            # Enable input - chỉ dùng SetFocus, KHÔNG dùng SetForegroundWindow (không hoạt động với child)
+            win32gui.EnableWindow(hwnd, True)
+            win32gui.SetFocus(hwnd)
+            
+            # Send WM_ACTIVATE để kích hoạt window
+            win32gui.PostMessage(hwnd, 0x0006, 1, 0)  # WM_ACTIVATE with WA_ACTIVATE
+            
+            time.sleep(0.3)
             
             print(f"[SUCCESS] Embedding successful", flush=True)
             return True
@@ -3379,7 +3455,13 @@ class FacebookWindow(QMainWindow):
         lay.addWidget(info)
         lay.addStretch()
         return w
-
+    def _focus_chrome(self, event):
+        """Forward mouse focus về Chrome khi click vào container"""
+        if self._chrome_hwnd and win32gui.IsWindow(self._chrome_hwnd):
+            try:
+                win32gui.SetFocus(self._chrome_hwnd)
+            except Exception:
+                pass
     def _build_browser(self):
         w = QWidget()
         w.setStyleSheet("background:#1e1e2e;")
@@ -3390,11 +3472,15 @@ class FacebookWindow(QMainWindow):
         # Container for Chrome
         self._chrome_container = ResizableContainer()
         self._chrome_container.resized.connect(self._sync_chrome_size)
+        self._chrome_container.mousePressEvent = self._focus_chrome
         self._chrome_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._chrome_container.setStyleSheet("background:#000000;")
         self._chrome_container.setAttribute(Qt.WA_NativeWindow)
         self._chrome_container.setAttribute(Qt.WA_DontCreateNativeAncestors)
         
+        # Install keyboard event filter để forward input tới Chrome
+        self._chrome_kb_filter = ChromeKeyboardFilter(lambda: self._chrome_hwnd)
+        self._chrome_container.installEventFilter(self._chrome_kb_filter)        
         container_layout = QVBoxLayout(self._chrome_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
