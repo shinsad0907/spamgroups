@@ -1,3 +1,7 @@
 PyQt5==5.15.9
 selenium==4.15.2
-supabase==2.3.0
+psutil>=5.9.0
+pypiwin32>=220
+groq>=0.4.0
+python-dotenv>=1.0.0
+requests>=2.31.0
